@@ -1,0 +1,23 @@
+node_modules/
+dist/
+dashboard/dist/
+dashboard/node_modules/
+*.db
+bench-reports/
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
+*~
+*.swp
+*.swo
+*.tgz
+coverage/
+clawhub-skills/
+clawhub/*.zip
+# Crawled registry (can be large); Docker/README use empty `[]` or mount your own
+clawhub/skills-seed.json
+.env
+.env.*
+!.env.example
+*.tsbuildinfo

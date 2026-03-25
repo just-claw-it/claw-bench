@@ -1,0 +1,6 @@
+{
+  "name": "echo-skill",
+  "description": "Echoes the input with a timestamp",
+  "type": "linear",
+  "entrypoint": "index.js"
+}

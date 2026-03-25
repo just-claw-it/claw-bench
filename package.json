@@ -1,0 +1,60 @@
+{
+  "name": "claw-bench",
+  "version": "0.1.0",
+  "description": "Benchmark tool for ClawHub skills",
+  "license": "MIT",
+  "author": "Just Claw It",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/just-claw-it/claw-bench.git"
+  },
+  "bugs": {
+    "url": "https://github.com/just-claw-it/claw-bench/issues"
+  },
+  "homepage": "https://github.com/just-claw-it/claw-bench#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "dist/cli.js",
+  "bin": {
+    "claw-bench": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "!dist/test",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "test": "npm run build && node --test dist/test/bench.test.js",
+    "prepublishOnly": "npm run build",
+    "lint": "eslint src/",
+    "clawhub": "node dist/cli.js clawhub",
+    "clawhub:crawl": "node dist/cli.js clawhub crawl",
+    "dashboard": "node dist/cli.js dashboard",
+    "dashboard:install": "cd dashboard && npm install",
+    "dashboard:build": "cd dashboard && npm run build",
+    "dashboard:dev": "cd dashboard && npm run dev",
+    "docker:build": "docker build -t claw-bench .",
+    "docker:up": "docker compose up --build"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "commander": "^12.0.0",
+    "express": "^4.21.0",
+    "sql.js": "^1.14.1",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/express": "^5.0.0",
+    "@types/node": "^20.0.0",
+    "@types/sql.js": "^1.4.10",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.4.0"
+  }
+}

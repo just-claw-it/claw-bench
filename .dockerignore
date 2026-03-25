@@ -1,0 +1,27 @@
+# Dependencies & build output (rebuilt in image)
+node_modules
+dist
+dashboard/node_modules
+dashboard/dist
+
+# Git & tooling
+.git
+.github
+.cursor
+*.md
+!README.md
+
+# Local data (mount at runtime)
+bench-reports
+coverage
+*.db
+clawhub-skills
+clawhub/*.zip
+
+# Huge generated seed — image ships empty []; mount or crawl inside container
+clawhub/skills-seed.json
+
+# IDE
+.vscode
+.idea
+*.tsbuildinfo

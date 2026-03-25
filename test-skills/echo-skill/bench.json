@@ -1,0 +1,15 @@
+{
+  "skillName": "echo-skill",
+  "pairs": [
+    {
+      "description": "Echoes a simple string input",
+      "input": { "input": "hello world" },
+      "expectedOutput": { "echo": "hello world" }
+    },
+    {
+      "description": "Echoes a message field",
+      "input": { "message": "benchmark test" },
+      "expectedOutput": { "echo": "benchmark test" }
+    }
+  ]
+}
