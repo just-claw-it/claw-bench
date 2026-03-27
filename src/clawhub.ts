@@ -11,9 +11,50 @@ import { ClawHubSkillEntry } from "./types.js";
 import { upsertClawHubSkill } from "./store.js";
 
 const DOWNLOAD_BASE = "https://wry-manatee-359.convex.site/api/v1/download";
-const MAX_RETRIES = 3;
+const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 2000;
-const CONCURRENCY = 3;
+/** Parallel downloads; default 1 to avoid HTTP 429 from bulk fetches. Override: CLAWHUB_DOWNLOAD_CONCURRENCY */
+const CONCURRENCY = Math.max(
+  1,
+  parseInt(process.env.CLAWHUB_DOWNLOAD_CONCURRENCY ?? "1", 10) || 1
+);
+const ZIP_SUBDIR = "zip";
+
+/** Parse Retry-After (delay-seconds or HTTP-date). Returns ms to wait, or null if absent/invalid. */
+function parseRetryAfterMs(res: Response): number | null {
+  const raw = res.headers.get("retry-after");
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  const secMatch = /^(\d+)$/.exec(trimmed);
+  if (secMatch) {
+    return parseInt(secMatch[1], 10) * 1000;
+  }
+  const dateMs = Date.parse(trimmed);
+  if (!Number.isNaN(dateMs)) {
+    return Math.max(0, dateMs - Date.now());
+  }
+  return null;
+}
+
+async function drainResponseBody(res: Response): Promise<void> {
+  try {
+    await res.arrayBuffer();
+  } catch {
+    // ignore
+  }
+}
+
+/** Wait duration after a failed HTTP response before retrying. */
+function delayMsAfterHttpError(res: Response, status: number, attempt: number): number {
+  const fromHeader = parseRetryAfterMs(res);
+  if (fromHeader !== null) {
+    return Math.min(300_000, Math.max(1_000, fromHeader));
+  }
+  if (status === 429 || status === 503) {
+    return Math.min(120_000, 5_000 * 2 ** (attempt - 1));
+  }
+  return RETRY_DELAY_MS * attempt;
+}
 
 // ── Seed list ──────────────────────────────────────────────────────────────
 
@@ -31,31 +72,94 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function getZipDir(clawhubDir: string): string {
+  return path.join(clawhubDir, ZIP_SUBDIR);
+}
+
+function ensureZipDir(clawhubDir: string): string {
+  const zipDir = getZipDir(clawhubDir);
+  if (!fs.existsSync(zipDir)) {
+    fs.mkdirSync(zipDir, { recursive: true });
+  }
+  return zipDir;
+}
+
+function isValidZipFile(filePath: string): boolean {
+  try {
+    const st = fs.statSync(filePath);
+    return st.isFile() && st.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+function moveLegacyZipsToSubdir(clawhubDir: string): number {
+  if (!fs.existsSync(clawhubDir)) return 0;
+  const zipDir = ensureZipDir(clawhubDir);
+  let moved = 0;
+
+  for (const file of fs.readdirSync(clawhubDir, { withFileTypes: true })) {
+    if (!file.isFile() || !file.name.toLowerCase().endsWith(".zip")) continue;
+    const src = path.join(clawhubDir, file.name);
+    const dst = path.join(zipDir, file.name);
+
+    try {
+      if (!fs.existsSync(dst)) {
+        fs.renameSync(src, dst);
+        moved++;
+        continue;
+      }
+
+      const srcValid = isValidZipFile(src);
+      const dstValid = isValidZipFile(dst);
+      if (srcValid && !dstValid) {
+        fs.unlinkSync(dst);
+        fs.renameSync(src, dst);
+        moved++;
+      } else {
+        fs.unlinkSync(src);
+      }
+    } catch {
+      // ignore migration errors; download flow can continue
+    }
+  }
+
+  return moved;
+}
+
 export async function downloadSkill(
   slug: string,
   destDir: string
-): Promise<{ zipPath: string; downloaded: boolean }> {
+): Promise<{ zipPath: string; downloaded: boolean; skipped?: boolean }> {
+  const existing = findExistingZip(slug, destDir);
+  if (existing) {
+    return { zipPath: existing, downloaded: true, skipped: true };
+  }
+
   const url = `${DOWNLOAD_BASE}?slug=${encodeURIComponent(slug)}`;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
       const res = await fetch(url);
       if (!res.ok) {
+        const waitMs = delayMsAfterHttpError(res, res.status, attempt);
+        await drainResponseBody(res);
         if (attempt < MAX_RETRIES) {
-          console.log(`  Retry ${attempt}/${MAX_RETRIES} for ${slug} (HTTP ${res.status})`);
-          await sleep(RETRY_DELAY_MS * attempt);
+          const sec = Math.round(waitMs / 1000);
+          console.log(
+            `  Retry ${attempt}/${MAX_RETRIES} for ${slug} (HTTP ${res.status}, waiting ${sec}s)`
+          );
+          await sleep(waitMs);
           continue;
         }
         console.warn(`  Failed to download ${slug}: HTTP ${res.status}`);
         return { zipPath: "", downloaded: false };
       }
 
-      if (!fs.existsSync(destDir)) {
-        fs.mkdirSync(destDir, { recursive: true });
-      }
+      const zipDir = ensureZipDir(destDir);
 
       const buffer = Buffer.from(await res.arrayBuffer());
-      const zipPath = path.join(destDir, `${slug}.zip`);
+      const zipPath = path.join(zipDir, `${slug}.zip`);
       fs.writeFileSync(zipPath, buffer);
       return { zipPath, downloaded: true };
     } catch (err) {
@@ -143,14 +247,48 @@ export function collectFileStats(dir: string): {
 
 // ── Find existing zips ─────────────────────────────────────────────────────
 
+/** True if a non-empty `${slug}.zip` exists (exact name; case-insensitive fallback on same dir). */
 export function findExistingZip(
   slug: string,
   clawhubDir: string
 ): string | null {
   if (!fs.existsSync(clawhubDir)) return null;
+  const zipDir = getZipDir(clawhubDir);
+
+  const exactPath = path.join(zipDir, `${slug}.zip`);
+  if (isValidZipFile(exactPath)) {
+    return exactPath;
+  }
+
+  const target = `${slug}.zip`.toLowerCase();
+  if (fs.existsSync(zipDir)) {
+    for (const file of fs.readdirSync(zipDir)) {
+      if (!file.toLowerCase().endsWith(".zip")) continue;
+      if (file.toLowerCase() !== target) continue;
+      const full = path.join(zipDir, file);
+      if (isValidZipFile(full)) return full;
+    }
+  }
+
   for (const file of fs.readdirSync(clawhubDir)) {
-    if (file.endsWith(".zip") && file.startsWith(slug)) {
-      return path.join(clawhubDir, file);
+    if (!file.toLowerCase().endsWith(".zip")) continue;
+    if (file.toLowerCase() !== target) continue;
+    const legacy = path.join(clawhubDir, file);
+    if (!isValidZipFile(legacy)) continue;
+    try {
+      const zipOutDir = ensureZipDir(clawhubDir);
+      const migratedPath = path.join(zipOutDir, `${slug}.zip`);
+      if (!fs.existsSync(migratedPath)) {
+        fs.renameSync(legacy, migratedPath);
+      } else if (!isValidZipFile(migratedPath)) {
+        fs.unlinkSync(migratedPath);
+        fs.renameSync(legacy, migratedPath);
+      } else {
+        fs.unlinkSync(legacy);
+      }
+      return migratedPath;
+    } catch {
+      return legacy;
     }
   }
   return null;
@@ -161,10 +299,22 @@ export function findExistingZip(
 export async function downloadAll(
   slugs: string[],
   destDir: string,
-  onProgress?: (slug: string, idx: number, total: number, ok: boolean) => void
-): Promise<{ succeeded: string[]; failed: string[] }> {
+  onProgress?: (
+    slug: string,
+    idx: number,
+    total: number,
+    ok: boolean,
+    skipped?: boolean
+  ) => void
+): Promise<{ succeeded: string[]; failed: string[]; skipped: number }> {
+  const moved = moveLegacyZipsToSubdir(destDir);
+  if (moved > 0) {
+    console.log(`Moved ${moved} legacy zip(s) into ${path.join("clawhub", ZIP_SUBDIR)}`);
+  }
+
   const succeeded: string[] = [];
   const failed: string[] = [];
+  let skippedCount = 0;
 
   const queue = [...slugs];
   let idx = 0;
@@ -176,25 +326,27 @@ export async function downloadAll(
 
       const existing = findExistingZip(slug, destDir);
       if (existing) {
-        onProgress?.(slug, currentIdx, slugs.length, true);
+        skippedCount++;
+        onProgress?.(slug, currentIdx, slugs.length, true, true);
         succeeded.push(slug);
         continue;
       }
 
-      const { downloaded } = await downloadSkill(slug, destDir);
+      const { downloaded, skipped } = await downloadSkill(slug, destDir);
+      if (skipped) skippedCount++;
       if (downloaded) {
         succeeded.push(slug);
       } else {
         failed.push(slug);
       }
-      onProgress?.(slug, currentIdx, slugs.length, downloaded);
+      onProgress?.(slug, currentIdx, slugs.length, downloaded, skipped);
     }
   };
 
   const workers = Array.from({ length: Math.min(CONCURRENCY, slugs.length) }, () => worker());
   await Promise.all(workers);
 
-  return { succeeded, failed };
+  return { succeeded, failed, skipped: skippedCount };
 }
 
 // ── Seed into DB ───────────────────────────────────────────────────────────

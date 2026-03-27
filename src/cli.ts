@@ -551,11 +551,14 @@ clawhub
       const seeds = loadSeedList(process.cwd());
       const slugs = seeds.map((s) => s.slug);
       console.log(`\nDownloading ${slugs.length} skills...\n`);
-      const result = await downloadAll(slugs, clawhubDir, (s, idx, total, ok) => {
-        const status = ok ? "OK" : "FAIL";
+      const result = await downloadAll(slugs, clawhubDir, (s, idx, total, ok, skipped) => {
+        const status = !ok ? "FAIL" : skipped ? "SKIP" : "OK";
         console.log(`  [${idx}/${total}] ${s} — ${status}`);
       });
-      console.log(`\nDone: ${result.succeeded.length} succeeded, ${result.failed.length} failed`);
+      const fresh = result.succeeded.length - result.skipped;
+      console.log(
+        `\nDone: ${result.succeeded.length} ok (${result.skipped} skipped, ${fresh} downloaded), ${result.failed.length} failed`
+      );
       if (result.failed.length > 0) {
         console.log(`  Failed: ${result.failed.join(", ")}`);
       }
@@ -564,7 +567,10 @@ clawhub
     } else {
       console.log(`\nDownloading: ${slug}`);
       const result = await downloadSkill(slug, clawhubDir);
-      if (result.downloaded) {
+      if (result.skipped) {
+        console.log(`  Already present: ${result.zipPath}`);
+        await seedSkillsToDB(process.cwd());
+      } else if (result.downloaded) {
         console.log(`  Saved to: ${result.zipPath}`);
         await seedSkillsToDB(process.cwd());
       } else {
