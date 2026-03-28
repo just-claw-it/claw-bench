@@ -94,6 +94,18 @@ export function pct(score: number): string {
 
 // ── ClawHub catalog types ──────────────────────────────────────────────────
 
+/** One LLM judge’s scores (latest run per model name for that skill). */
+export interface LlmModelBreakdown {
+  model: string;
+  analyzed_at: string;
+  llm_clarity: number;
+  llm_usefulness: number;
+  llm_safety: number;
+  llm_completeness: number;
+  llm_composite: number;
+  llm_reasoning?: string | null;
+}
+
 export interface CatalogSkill {
   slug: string;
   name: string;
@@ -119,6 +131,10 @@ export interface CatalogSkill {
   llm_safety: number | null;
   llm_completeness: number | null;
   llm_composite: number | null;
+  /** Distinct LLM models with scores (latest row per model); null if none. */
+  llm_model_count: number | null;
+  /** JSON array of LlmModelBreakdown (compact in catalog: no reasoning). */
+  llm_models_json: string | null;
   overall_composite: number | null;
 }
 

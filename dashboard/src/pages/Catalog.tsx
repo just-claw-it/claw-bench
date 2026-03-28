@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from "react";
 import { useCatalog } from "../api";
 import { type CatalogSkill, pct, scoreColor } from "../types";
 import ScoreBar from "../components/ScoreBar";
+import { LlmBreakdownInline, parseLlmModelsJson } from "../components/LlmMultiModelHint";
 
 type SortKey = "overall" | "name" | "downloads" | "stars";
 type ViewMode = "table" | "grid";
@@ -252,8 +253,18 @@ function SkillCard({ skill }: { skill: CatalogSkill }) {
           </p>
         </div>
         {skill.overall_composite != null && (
-          <span className={`text-lg font-bold ${scoreColor(skill.overall_composite)}`}>
+          <span
+            className={`text-lg font-bold ${scoreColor(skill.overall_composite)}`}
+            title={
+              (skill.llm_model_count ?? 0) > 1
+                ? "Uses 60% static + 40% LLM; LLM term is the average across multiple models."
+                : undefined
+            }
+          >
             {pct(skill.overall_composite)}
+            {(skill.llm_model_count ?? 0) > 1 ? (
+              <span className="ml-1 text-[10px] font-normal text-slate-400">multi-LLM</span>
+            ) : null}
           </span>
         )}
       </div>
@@ -277,7 +288,27 @@ function SkillCard({ skill }: { skill: CatalogSkill }) {
         <div className="space-y-1.5">
           <ScoreBar score={skill.static_composite} label="Static" />
           {skill.llm_composite != null && (
-            <ScoreBar score={skill.llm_composite} label="LLM" />
+            <div>
+              <ScoreBar score={skill.llm_composite} label="LLM" />
+              {(skill.llm_model_count ?? 0) > 1 ? (
+                <details className="mt-1.5 text-[10px] text-slate-400">
+                  <summary className="cursor-pointer select-none hover:text-slate-500">
+                    Avg of {skill.llm_model_count} models (hover score for detail)
+                  </summary>
+                  <ul className="mt-1 pl-3 list-disc space-y-0.5 text-slate-500 dark:text-slate-400">
+                    {parseLlmModelsJson(skill.llm_models_json).map((m) => (
+                      <li key={`${m.model}-${m.analyzed_at}`}>
+                        <span className="font-medium text-slate-600 dark:text-slate-300">
+                          {m.model}
+                        </span>
+                        {": "}
+                        {pct(m.llm_composite)}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              ) : null}
+            </div>
           )}
         </div>
       )}
@@ -334,16 +365,30 @@ function SkillTable({
                   <span className="text-slate-400">--</span>
                 )}
               </td>
-              <td className="px-4 py-2 font-mono">
-                {sk.llm_composite != null ? (
-                  <span className={scoreColor(sk.llm_composite)}>{pct(sk.llm_composite)}</span>
-                ) : (
-                  <span className="text-slate-400">--</span>
-                )}
+              <td className="px-4 py-2 font-mono align-top">
+                <LlmBreakdownInline
+                  llmComposite={sk.llm_composite}
+                  llmModelCount={sk.llm_model_count}
+                  llmModelsJson={sk.llm_models_json}
+                  scoreClassName={scoreColor(sk.llm_composite)}
+                  expandable
+                />
               </td>
-              <td className="px-4 py-2 font-mono font-semibold">
+              <td className="px-4 py-2 font-mono font-semibold align-top">
                 {sk.overall_composite != null ? (
-                  <span className={scoreColor(sk.overall_composite)}>{pct(sk.overall_composite)}</span>
+                  <span
+                    className={scoreColor(sk.overall_composite)}
+                    title={
+                      (sk.llm_model_count ?? 0) > 1
+                        ? "60% static + 40% LLM; LLM term averaged across models."
+                        : undefined
+                    }
+                  >
+                    {pct(sk.overall_composite)}
+                    {(sk.llm_model_count ?? 0) > 1 ? (
+                      <span className="ml-1 text-[10px] font-normal text-slate-400">*</span>
+                    ) : null}
+                  </span>
                 ) : (
                   <span className="text-slate-400">--</span>
                 )}

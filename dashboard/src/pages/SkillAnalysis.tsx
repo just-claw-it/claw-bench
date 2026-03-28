@@ -4,6 +4,7 @@ import { type SkillAnalysisDetail, pct, scoreColor } from "../types";
 import ScoreBar from "../components/ScoreBar";
 import AnalysisRadar from "../components/AnalysisRadar";
 import StatCard from "../components/StatCard";
+import { parseLlmModelsJson } from "../components/LlmMultiModelHint";
 
 export default function SkillAnalysis() {
   const { slug } = useParams<{ slug: string }>();
@@ -27,6 +28,9 @@ export default function SkillAnalysis() {
 
   const skill = data as SkillAnalysisDetail;
   const hasLLM = skill.llm_composite != null;
+  const llmModels = parseLlmModelsJson(skill.llm_models_json ?? null);
+  const llmMulti =
+    (skill.llm_model_count ?? 0) > 1 || llmModels.length > 1;
 
   return (
     <div className="space-y-8">
@@ -85,7 +89,11 @@ export default function SkillAnalysis() {
                 {pct(skill.overall_composite)}
               </p>
               <p className="text-xs text-slate-400 mt-2">
-                {hasLLM ? "60% static + 40% LLM" : "100% static analysis"}
+                {hasLLM
+                  ? llmMulti
+                    ? `60% static + 40% LLM (LLM term = average of ${skill.llm_model_count ?? llmModels.length} models)`
+                    : "60% static + 40% LLM"
+                  : "100% static analysis"}
               </p>
             </div>
             {skill.analyzed_at && (
@@ -132,31 +140,82 @@ export default function SkillAnalysis() {
             <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 shadow-sm">
               <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-4">
                 LLM Evaluation
+                {llmMulti ? (
+                  <span className="ml-2 text-xs font-normal text-slate-400">
+                    (average across {skill.llm_model_count ?? llmModels.length} models)
+                  </span>
+                ) : null}
                 <span className={`ml-3 text-lg font-bold ${scoreColor(skill.llm_composite!)}`}>
                   {pct(skill.llm_composite!)}
                 </span>
               </h3>
               <div className="space-y-3">
                 {skill.llm_clarity != null && (
-                  <ScoreBar score={skill.llm_clarity} label="Clarity" />
+                  <ScoreBar
+                    score={skill.llm_clarity}
+                    label={llmMulti ? "Clarity (avg)" : "Clarity"}
+                  />
                 )}
                 {skill.llm_usefulness != null && (
-                  <ScoreBar score={skill.llm_usefulness} label="Usefulness" />
+                  <ScoreBar
+                    score={skill.llm_usefulness}
+                    label={llmMulti ? "Usefulness (avg)" : "Usefulness"}
+                  />
                 )}
                 {skill.llm_safety != null && (
-                  <ScoreBar score={skill.llm_safety} label="Safety" />
+                  <ScoreBar
+                    score={skill.llm_safety}
+                    label={llmMulti ? "Safety (avg)" : "Safety"}
+                  />
                 )}
                 {skill.llm_completeness != null && (
-                  <ScoreBar score={skill.llm_completeness} label="Completeness" />
+                  <ScoreBar
+                    score={skill.llm_completeness}
+                    label={llmMulti ? "Completeness (avg)" : "Completeness"}
+                  />
                 )}
               </div>
-              {skill.llm_reasoning && (
+              {!llmMulti && skill.llm_reasoning && (
                 <p className="mt-4 text-xs text-slate-500 dark:text-slate-400 italic border-t border-slate-200 dark:border-slate-700 pt-3">
                   {skill.llm_reasoning}
                 </p>
               )}
-              {skill.llm_model && (
+              {!llmMulti && skill.llm_model && (
                 <p className="mt-2 text-[10px] text-slate-400">Model: {skill.llm_model}</p>
+              )}
+              {llmMulti && llmModels.length > 0 && (
+                <div className="mt-4 border-t border-slate-200 dark:border-slate-700 pt-4 space-y-3">
+                  <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">
+                    Per model
+                  </p>
+                  {llmModels.map((m) => (
+                    <details
+                      key={`${m.model}-${m.analyzed_at}`}
+                      className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/40"
+                    >
+                      <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-100/80 dark:hover:bg-slate-800/80 rounded-lg">
+                        {m.model}
+                        <span className={`ml-2 font-bold ${scoreColor(m.llm_composite)}`}>
+                          {pct(m.llm_composite)}
+                        </span>
+                        <span className="ml-2 text-[10px] font-normal text-slate-400">
+                          {new Date(m.analyzed_at).toLocaleString()}
+                        </span>
+                      </summary>
+                      <div className="px-3 pb-3 pt-1 space-y-2 border-t border-slate-200 dark:border-slate-700">
+                        <ScoreBar score={m.llm_clarity} label="Clarity" />
+                        <ScoreBar score={m.llm_usefulness} label="Usefulness" />
+                        <ScoreBar score={m.llm_safety} label="Safety" />
+                        <ScoreBar score={m.llm_completeness} label="Completeness" />
+                        {m.llm_reasoning ? (
+                          <p className="text-xs text-slate-500 dark:text-slate-400 italic pt-2">
+                            {m.llm_reasoning}
+                          </p>
+                        ) : null}
+                      </div>
+                    </details>
+                  ))}
+                </div>
               )}
             </div>
           ) : (
@@ -183,6 +242,11 @@ export default function SkillAnalysis() {
         <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-6 shadow-sm">
           <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">
             Static vs LLM Radar
+            {llmMulti ? (
+              <span className="ml-2 text-xs font-normal text-slate-400">
+                (LLM axes = averages across models)
+              </span>
+            ) : null}
           </h3>
           <AnalysisRadar
             staticScores={{

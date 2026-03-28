@@ -553,18 +553,80 @@ export function storeClawHubAnalysis(analysis: ClawHubAnalysis): Promise<number>
   });
 }
 
-const CLAWHUB_CATALOG_SELECT = `SELECT s.*,
-       a.doc_quality, a.completeness AS completeness_score, a.security,
-       a.code_quality, a.maintainability, a.static_composite,
-       a.llm_clarity, a.llm_usefulness, a.llm_safety, a.llm_completeness,
-       a.llm_composite, a.overall_composite, a.analyzed_at,
-       CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS analyzed`;
+/** Latest analysis row per skill (static + metadata). */
+const CLAWHUB_LATEST_ANALYSIS_SUB = `
+  SELECT *, ROW_NUMBER() OVER (PARTITION BY slug ORDER BY analyzed_at DESC) AS rn
+  FROM clawhub_analysis
+`;
 
+/** Latest row per (slug, llm_model) among runs that have LLM scores. */
+const CLAWHUB_LLM_LATEST_PER_MODEL_SUB = `
+  SELECT ca.*,
+    ROW_NUMBER() OVER (
+      PARTITION BY ca.slug, ca.llm_model
+      ORDER BY ca.analyzed_at DESC
+    ) AS rnm
+  FROM clawhub_analysis ca
+  WHERE ca.llm_model IS NOT NULL AND ca.llm_composite IS NOT NULL
+`;
+
+/**
+ * Join catalog skills to latest static row + LLM aggregates (avg over distinct models,
+ * each model using its latest run). overall_composite = 60% static + 40% avg LLM when LLM data exists.
+ */
 const CLAWHUB_ANALYSIS_JOIN = `FROM clawhub_skills s
-     LEFT JOIN (
-       SELECT *, ROW_NUMBER() OVER (PARTITION BY slug ORDER BY analyzed_at DESC) AS rn
-       FROM clawhub_analysis
-     ) a ON a.slug = s.slug AND a.rn = 1`;
+LEFT JOIN (
+  ${CLAWHUB_LATEST_ANALYSIS_SUB}
+) latest ON latest.slug = s.slug AND latest.rn = 1
+LEFT JOIN (
+  SELECT
+    lp.slug,
+    COUNT(*) AS llm_model_count,
+    AVG(lp.llm_clarity) AS llm_clarity,
+    AVG(lp.llm_usefulness) AS llm_usefulness,
+    AVG(lp.llm_safety) AS llm_safety,
+    AVG(lp.llm_completeness) AS llm_completeness,
+    AVG(lp.llm_composite) AS llm_composite
+  FROM (${CLAWHUB_LLM_LATEST_PER_MODEL_SUB}) lp
+  WHERE lp.rnm = 1
+  GROUP BY lp.slug
+) llm ON llm.slug = s.slug
+LEFT JOIN (
+  SELECT
+    lp.slug,
+    json_group_array(
+      json_object(
+        'model', lp.llm_model,
+        'analyzed_at', lp.analyzed_at,
+        'llm_clarity', lp.llm_clarity,
+        'llm_usefulness', lp.llm_usefulness,
+        'llm_safety', lp.llm_safety,
+        'llm_completeness', lp.llm_completeness,
+        'llm_composite', lp.llm_composite
+      )
+    ) AS llm_models_json
+  FROM (${CLAWHUB_LLM_LATEST_PER_MODEL_SUB}) lp
+  WHERE lp.rnm = 1
+  GROUP BY lp.slug
+) llm_json ON llm_json.slug = s.slug`;
+
+/** Matches analyzer: 60% static + 40% LLM when aggregated LLM composite exists. */
+const CLAWHUB_OVERALL_EXPR = `CASE
+         WHEN llm.llm_composite IS NOT NULL AND latest.static_composite IS NOT NULL
+           THEN latest.static_composite * 0.6 + llm.llm_composite * 0.4
+         ELSE COALESCE(latest.overall_composite, latest.static_composite)
+       END`;
+
+const CLAWHUB_CATALOG_SELECT = `SELECT s.*,
+       latest.doc_quality, latest.completeness AS completeness_score, latest.security,
+       latest.code_quality, latest.maintainability, latest.static_composite,
+       llm.llm_clarity, llm.llm_usefulness, llm.llm_safety, llm.llm_completeness,
+       llm.llm_composite,
+       llm.llm_model_count,
+       llm_json.llm_models_json,
+       (${CLAWHUB_OVERALL_EXPR}) AS overall_composite,
+       (SELECT MAX(ca.analyzed_at) FROM clawhub_analysis ca WHERE ca.slug = s.slug) AS analyzed_at,
+       CASE WHEN latest.id IS NOT NULL THEN 1 ELSE 0 END AS analyzed`;
 
 export interface ClawHubCatalogPageOpts {
   page: number;
@@ -584,8 +646,8 @@ function catalogOrderBy(sort: ClawHubCatalogPageOpts["sort"]): string {
     case "stars":
       return "s.stars DESC";
     default:
-      return `CASE WHEN a.overall_composite IS NULL THEN 1 ELSE 0 END,
-              a.overall_composite DESC,
+      return `CASE WHEN (${CLAWHUB_OVERALL_EXPR}) IS NULL THEN 1 ELSE 0 END,
+              (${CLAWHUB_OVERALL_EXPR}) DESC,
               s.slug ASC`;
   }
 }
@@ -610,7 +672,7 @@ export async function getClawHubSkillsPaged(
     params.push(like, like, like, like);
   }
   if (opts.analyzedOnly) {
-    conditions.push("a.id IS NOT NULL");
+    conditions.push("latest.id IS NOT NULL");
   }
   if (opts.withScripts) {
     conditions.push("s.has_scripts = 1");
@@ -633,28 +695,66 @@ export async function getClawHubSkillsPaged(
 export async function getClawHubSkills(): Promise<Record<string, unknown>[]> {
   return query(
     `${CLAWHUB_CATALOG_SELECT} ${CLAWHUB_ANALYSIS_JOIN}
-     ORDER BY CASE WHEN a.overall_composite IS NULL THEN 1 ELSE 0 END,
-              a.overall_composite DESC,
+     ORDER BY CASE WHEN (${CLAWHUB_OVERALL_EXPR}) IS NULL THEN 1 ELSE 0 END,
+              (${CLAWHUB_OVERALL_EXPR}) DESC,
               s.slug ASC`
   );
 }
 
 export async function getClawHubSkillDetail(slug: string): Promise<Record<string, unknown> | null> {
+  const LLM_DETAIL_JSON_SUB = `
+    SELECT
+      lp.slug,
+      json_group_array(
+        json_object(
+          'model', lp.llm_model,
+          'analyzed_at', lp.analyzed_at,
+          'llm_clarity', lp.llm_clarity,
+          'llm_usefulness', lp.llm_usefulness,
+          'llm_safety', lp.llm_safety,
+          'llm_completeness', lp.llm_completeness,
+          'llm_composite', lp.llm_composite,
+          'llm_reasoning', lp.llm_reasoning
+        )
+      ) AS llm_models_json
+    FROM (${CLAWHUB_LLM_LATEST_PER_MODEL_SUB}) lp
+    WHERE lp.rnm = 1 AND lp.slug = ?
+    GROUP BY lp.slug
+  `;
+
   const rows = await query(
     `SELECT s.*,
-       a.doc_quality, a.completeness AS completeness_score, a.security,
-       a.code_quality, a.maintainability, a.static_composite,
-       a.llm_clarity, a.llm_usefulness, a.llm_safety, a.llm_completeness,
-       a.llm_composite, a.llm_model, a.llm_reasoning,
-       a.overall_composite, a.analyzed_at,
-       CASE WHEN a.id IS NOT NULL THEN 1 ELSE 0 END AS analyzed
+       latest.doc_quality, latest.completeness AS completeness_score, latest.security,
+       latest.code_quality, latest.maintainability, latest.static_composite,
+       llm.llm_clarity, llm.llm_usefulness, llm.llm_safety, llm.llm_completeness,
+       llm.llm_composite,
+       llm.llm_model_count,
+       detail.llm_models_json,
+       latest.llm_model AS llm_model,
+       latest.llm_reasoning AS llm_reasoning,
+       (${CLAWHUB_OVERALL_EXPR}) AS overall_composite,
+       (SELECT MAX(ca.analyzed_at) FROM clawhub_analysis ca WHERE ca.slug = s.slug) AS analyzed_at,
+       CASE WHEN latest.id IS NOT NULL THEN 1 ELSE 0 END AS analyzed
      FROM clawhub_skills s
      LEFT JOIN (
-       SELECT *, ROW_NUMBER() OVER (PARTITION BY slug ORDER BY analyzed_at DESC) AS rn
-       FROM clawhub_analysis
-     ) a ON a.slug = s.slug AND a.rn = 1
+       ${CLAWHUB_LATEST_ANALYSIS_SUB}
+     ) latest ON latest.slug = s.slug AND latest.rn = 1
+     LEFT JOIN (
+       SELECT
+         lp.slug,
+         COUNT(*) AS llm_model_count,
+         AVG(lp.llm_clarity) AS llm_clarity,
+         AVG(lp.llm_usefulness) AS llm_usefulness,
+         AVG(lp.llm_safety) AS llm_safety,
+         AVG(lp.llm_completeness) AS llm_completeness,
+         AVG(lp.llm_composite) AS llm_composite
+       FROM (${CLAWHUB_LLM_LATEST_PER_MODEL_SUB}) lp
+       WHERE lp.rnm = 1
+       GROUP BY lp.slug
+     ) llm ON llm.slug = s.slug
+     LEFT JOIN (${LLM_DETAIL_JSON_SUB}) detail ON detail.slug = s.slug
      WHERE s.slug = ?`,
-    [slug]
+    [slug, slug]
   );
   return rows[0] ?? null;
 }
