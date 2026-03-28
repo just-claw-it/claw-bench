@@ -551,6 +551,38 @@ export async function hasClawHubLlmAnalysisForModel(
   return rows.length > 0;
 }
 
+/** Remove every row in `clawhub_analysis` (full catalog re-analyze). */
+export function deleteAllClawHubAnalysis(): Promise<void> {
+  return serialize(async () => {
+    const SQL = await getSql();
+    const fp = dbPath();
+    if (!fs.existsSync(fp)) return;
+    const db = loadDb(SQL, fp);
+    db.run("DELETE FROM clawhub_analysis");
+    saveDb(db, fp);
+    db.close();
+  });
+}
+
+/** Remove all analysis history for the given slugs (chunked for large lists). */
+export function deleteClawHubAnalysisForSlugs(slugs: string[]): Promise<void> {
+  if (slugs.length === 0) return Promise.resolve();
+  return serialize(async () => {
+    const SQL = await getSql();
+    const fp = dbPath();
+    if (!fs.existsSync(fp)) return;
+    const db = loadDb(SQL, fp);
+    const chunk = 400;
+    for (let i = 0; i < slugs.length; i += chunk) {
+      const part = slugs.slice(i, i + chunk);
+      const placeholders = part.map(() => "?").join(",");
+      db.run(`DELETE FROM clawhub_analysis WHERE slug IN (${placeholders})`, part);
+    }
+    saveDb(db, fp);
+    db.close();
+  });
+}
+
 export function storeClawHubAnalysis(analysis: ClawHubAnalysis): Promise<number> {
   return serialize(async () => {
     const SQL = await getSql();

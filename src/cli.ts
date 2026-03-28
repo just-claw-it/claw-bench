@@ -601,6 +601,10 @@ clawhub
     "--no-seed",
     "Skip syncing the full seed list into SQLite before analyzing (faster after crawl/download; dashboard zip paths may be stale until next seed)"
   )
+  .option(
+    "--clean-analysis",
+    "Before analyzing: delete prior clawhub_analysis rows (full table when the run covers the entire seed list; otherwise only the slugs in this run). Does not touch clawhub_skills or zips."
+  )
   .action(async (slug: string | undefined, opts) => {
     const { loadSeedList, extractSkill, findExistingZip, seedSkillsToDB } = await import("./clawhub.js");
     const { analyzeSkill, resolvedCatalogLlmModel } = await import("./clawhub-analyzer.js");
@@ -608,6 +612,8 @@ clawhub
       storeClawHubAnalysis,
       upsertClawHubSkill,
       hasClawHubLlmAnalysisForModel,
+      deleteAllClawHubAnalysis,
+      deleteClawHubAnalysisForSlugs,
     } = await import("./store.js");
 
     const clawhubDir = path.join(process.cwd(), "clawhub");
@@ -627,6 +633,23 @@ clawhub
     if (toAnalyze.length === 0 && slug) {
       console.error(`\nSkill "${slug}" not found in seed list.\n`);
       process.exit(1);
+    }
+
+    if (opts.cleanAnalysis) {
+      const fullSeedRun =
+        seeds.length > 0 && toAnalyze.length === seeds.length;
+      if (fullSeedRun) {
+        await deleteAllClawHubAnalysis();
+        console.log(
+          "\nRemoved all rows from clawhub_analysis (--clean-analysis). Fresh rows will be inserted as each skill is analyzed.\n"
+        );
+      } else {
+        const slugs = toAnalyze.map((s) => s.slug);
+        await deleteClawHubAnalysisForSlugs(slugs);
+        console.log(
+          `\nRemoved prior clawhub_analysis rows for ${slugs.length} slug(s) (--clean-analysis).\n`
+        );
+      }
     }
 
     console.log(

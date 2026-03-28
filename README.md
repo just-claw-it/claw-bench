@@ -105,13 +105,38 @@ npx claw-bench clawhub crawl --sort stars
 
 **Analyze** — extracts to `clawhub-skills/<slug>/`, static + optional **`--llm`**. **`--cleanup`** drops zip + extract after each skill. Unless **`--no-seed`**, analyze **re-syncs the full seed into SQLite** first (like crawl/download) so `zip_path` matches disk—skip that when you already ran those steps and want to avoid a long upsert pass.
 
+By default each run **appends** new rows to **`clawhub_analysis`**; it does **not** remove older results. Use **`--clean-analysis`** to wipe prior rows first: **full table** `DELETE` when the run covers the **entire** seed list (e.g. `analyze` with no slug, or any case where every seed is in scope); otherwise only **`DELETE` for the slugs** in that run (e.g. `analyze my-skill --clean-analysis`). Catalog rows in **`clawhub_skills`** and zips are unchanged.
+
 ```bash
 npx claw-bench clawhub download --all
 npx claw-bench clawhub analyze --all --no-seed
 npx claw-bench clawhub analyze --all --llm --no-seed
+# Wipe all prior analysis rows, then re-analyze from scratch (same LLM model ok without --force)
+npx claw-bench clawhub analyze --all --llm --no-seed --clean-analysis
 # CLAWHUB_LLM_PROVIDER=ollama OLLAMA_ANALYSIS_MODEL=llama3.1:8b npx claw-bench clawhub analyze --all --llm --no-seed
 # npx claw-bench clawhub analyze --all --cleanup
 ```
+
+**Analyze timing** — For each skill that runs through analyze, the CLI prints a **`time:`** line with millisecond breakdowns: **`extract`** (unzip into `clawhub-skills/`, or `0` if already extracted), **`static`** (five static checks + composite), **`llm`** (or `n/a` without `--llm`), **`fileStats`** (tree scan), **`pipeline`** (full `analyzeSkill()` wall time), and **`total`** (`extract` + `pipeline`).
+
+The same numbers are persisted on **each insert** into SQLite table **`clawhub_analysis`**:
+
+| Column | Meaning |
+|--------|---------|
+| `extract_ms` | Unzip / prepare extracted folder |
+| `static_analysis_ms` | Static analyzers only |
+| `llm_ms` | LLM call when `--llm` (SQL `NULL` when not used) |
+| `file_stats_ms` | `collectFileStats` |
+| `pipeline_ms` | Entire `analyzeSkill()` run |
+
+Database file: **`CLAW_BENCH_DB`** (default **`~/.claw-bench/bench.db`**). Existing databases get these columns via migration on next open. The **ClawHub Catalog** dashboard does not show timing yet; use the CLI output or query SQLite (e.g. `SELECT slug, analyzed_at, extract_ms, pipeline_ms FROM clawhub_analysis ORDER BY id DESC LIMIT 20`).
+
+**Re-run / backfill timing and scores** — Each `clawhub analyze` **inserts a new row**; nothing is updated in place unless you pass **`--clean-analysis`**. The catalog and dashboard use the **latest row per skill** (by `analyzed_at`), so older rows (including those with `NULL` timing columns from before timing existed) are **ignored** for display once a newer analysis exists.
+
+1. Run analyze again as usual, e.g. `npx claw-bench clawhub analyze --all --llm --no-seed` (keeps history; newest row wins).
+2. To **drop old analysis rows before the run**, add **`--clean-analysis`** (see above). After a full-table clean, **`--force`** is not required to re-run LLM on the same model (there is no prior row to skip).
+3. If you use **`--llm`** **without** **`--clean-analysis`**, add **`--force`** when you want to **append** another evaluation for skills that already have a row for the **same** LLM model.
+4. Manual SQL (backup first) still works if you prefer: `DELETE FROM clawhub_analysis;` or per-slug `DELETE FROM clawhub_analysis WHERE slug = 'my-skill';`
 
 `npx claw-bench clawhub status` — zips vs seed vs analyzed counts.
 

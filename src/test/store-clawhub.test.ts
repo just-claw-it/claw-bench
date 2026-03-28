@@ -129,3 +129,62 @@ describe("store ClawHub analysis", () => {
     assert.equal(rows1[0]?.llm_ms, 500);
   });
 });
+
+describe("deleteClawHubAnalysis helpers", () => {
+  const dbFile = path.join(os.tmpdir(), `claw-bench-store-del-${process.pid}.db`);
+  let prevDb: string | undefined;
+
+  before(() => {
+    prevDb = process.env.CLAW_BENCH_DB;
+    process.env.CLAW_BENCH_DB = dbFile;
+    if (fs.existsSync(dbFile)) fs.unlinkSync(dbFile);
+  });
+
+  after(() => {
+    if (prevDb === undefined) delete process.env.CLAW_BENCH_DB;
+    else process.env.CLAW_BENCH_DB = prevDb;
+    try {
+      if (fs.existsSync(dbFile)) fs.unlinkSync(dbFile);
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it("deleteClawHubAnalysisForSlugs removes matching rows only", async () => {
+    const {
+      upsertClawHubSkill,
+      storeClawHubAnalysis,
+      deleteClawHubAnalysisForSlugs,
+      query,
+    } = await import("../store.js");
+
+    await upsertClawHubSkill(entry, {});
+    await storeClawHubAnalysis(baseAnalysis());
+
+    const other: ClawHubSkillEntry = { ...entry, slug: "other-skill" };
+    await upsertClawHubSkill(other, {});
+    await storeClawHubAnalysis(baseAnalysis({ slug: "other-skill" }));
+
+    let n = await query<{ c: number }>("SELECT COUNT(*) AS c FROM clawhub_analysis", []);
+    assert.equal(n[0]?.c, 2);
+
+    await deleteClawHubAnalysisForSlugs([entry.slug]);
+
+    n = await query<{ c: number }>("SELECT COUNT(*) AS c FROM clawhub_analysis", []);
+    assert.equal(n[0]?.c, 1);
+    const left = await query<{ slug: string }>("SELECT slug FROM clawhub_analysis", []);
+    assert.equal(left[0]?.slug, "other-skill");
+  });
+
+  it("deleteAllClawHubAnalysis clears the table", async () => {
+    const { upsertClawHubSkill, storeClawHubAnalysis, deleteAllClawHubAnalysis, query } =
+      await import("../store.js");
+
+    await upsertClawHubSkill(entry, {});
+    await storeClawHubAnalysis(baseAnalysis());
+    await deleteAllClawHubAnalysis();
+
+    const n = await query<{ c: number }>("SELECT COUNT(*) AS c FROM clawhub_analysis", []);
+    assert.equal(n[0]?.c, 0);
+  });
+});
