@@ -370,7 +370,9 @@ function SkillTable({
                   llmComposite={sk.llm_composite}
                   llmModelCount={sk.llm_model_count}
                   llmModelsJson={sk.llm_models_json}
-                  scoreClassName={scoreColor(sk.llm_composite)}
+                  scoreClassName={
+                    sk.llm_composite != null ? scoreColor(sk.llm_composite) : "text-slate-400"
+                  }
                   expandable
                 />
               </td>
