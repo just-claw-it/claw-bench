@@ -28,7 +28,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/cli.js",
-    "test:run": "node --test dist/test/bench.test.js dist/test/clawhub-scoring.test.js",
+    "test:run": "node --test dist/test/bench.test.js dist/test/clawhub-scoring.test.js dist/test/clawhub-analyzer.test.js dist/test/store-clawhub.test.js",
     "test": "npm run build && npm run test:run",
     "prepublishOnly": "npm run build",
     "lint": "eslint src/",

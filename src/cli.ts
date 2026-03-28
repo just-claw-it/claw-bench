@@ -613,7 +613,8 @@ clawhub
     const clawhubDir = path.join(process.cwd(), "clawhub");
     const skillsDir = path.join(process.cwd(), "clawhub-skills");
     const seeds = loadSeedList(process.cwd());
-    if (!opts.noSeed) {
+    // Commander: `--no-seed` → option attribute `seed` (default true); `--no-seed` sets `seed` to false — not `noSeed`.
+    if (opts.seed !== false) {
       await seedSkillsToDB(process.cwd());
     } else {
       console.log("\nSkipping catalog seed (--no-seed). Ensure you ran crawl/download recently.\n");
