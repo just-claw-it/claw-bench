@@ -592,6 +592,10 @@ clawhub
     "--llm",
     "Include LLM evaluation (set CLAWHUB_LLM_PROVIDER + API keys — see README)"
   )
+  .option(
+    "--no-seed",
+    "Skip syncing the full seed list into SQLite before analyzing (faster after crawl/download; dashboard zip paths may be stale until next seed)"
+  )
   .action(async (slug: string | undefined, opts) => {
     const { loadSeedList, extractSkill, findExistingZip, seedSkillsToDB } = await import("./clawhub.js");
     const { analyzeSkill } = await import("./clawhub-analyzer.js");
@@ -600,7 +604,11 @@ clawhub
     const clawhubDir = path.join(process.cwd(), "clawhub");
     const skillsDir = path.join(process.cwd(), "clawhub-skills");
     const seeds = loadSeedList(process.cwd());
-    await seedSkillsToDB(process.cwd());
+    if (!opts.noSeed) {
+      await seedSkillsToDB(process.cwd());
+    } else {
+      console.log("\nSkipping catalog seed (--no-seed). Ensure you ran crawl/download recently.\n");
+    }
 
     const toAnalyze = (opts.all || !slug)
       ? seeds

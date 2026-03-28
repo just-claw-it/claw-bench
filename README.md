@@ -42,7 +42,7 @@ npm install claw-bench
 
 ### Running from this repository (`command not found: claw-bench`)
 
-The `claw-bench` command is only on your shell `PATH` if you install the package globally (`npm install -g claw-bench`) or link it (`npm link` inside this repo). When you clone the repo and run `claw-bench` directly, zsh reports **command not found**.
+The `claw-bench` command is only on your shell `PATH` if you install the package globally (`npm install -g claw-bench`) or link it (`npm link` inside this repo). When you clone the repo and run `claw-bench` directly, your shell may report **command not found**.
 
 From the project root, build once, then use one of these:
 
@@ -69,56 +69,51 @@ docker compose up --build
 - **SQLite** is stored on the **`clawbench-data`** volume at **`CLAW_BENCH_DB=/data/bench.db`** (survives container restarts).
 - The HTTP server binds **`0.0.0.0`** by default so published ports work; set **`CLAW_BENCH_BIND`** (e.g. `127.0.0.1`) to override.
 - **`NODE_ENV=production`** (set in the image) hides local smoke-test runs (e.g. `test-skills/echo-skill`) from dashboard API responses. Set **`CLAW_BENCH_SHOW_TEST_RUNS=1`** in the container environment if you want them listed.
-- The image ships an **empty** `clawhub/skills-seed.json` (`[]`). Populate the catalog by **exec**’ing into the container, or **bind-mount** a seed file:
+- The image ships an **empty** `clawhub/skills-seed.json` (`[]`). Populate the catalog by **exec**’ing into the container, or **bind-mount** seed and optionally `clawhub/zip/` for downloads.
 
 ```bash
-# One-off: crawl registry inside the running container (writes DB + /app/clawhub — ephemeral unless you mount /app/clawhub)
 docker compose exec claw-bench node dist/cli.js clawhub crawl --dry-run
 docker compose exec claw-bench node dist/cli.js clawhub crawl
 ```
 
-Or add a read-only mount in `docker-compose.yml`:
+Mount examples in `docker-compose.yml`:
 
 ```yaml
 volumes:
   - ./clawhub/skills-seed.json:/app/clawhub/skills-seed.json:ro
+  # optional: persist downloaded zips
+  - ./clawhub/zip:/app/clawhub/zip
 ```
 
 Plain **Docker** (no Compose): `docker build -t claw-bench .` then  
 `docker run -p 3077:3077 -v clawbench-data:/data claw-bench`.
 
-### Crawling the full ClawHub registry
+### ClawHub: crawl, download, analyze
 
-The [skills page](https://clawhub.ai/skills) is a client-side app; you do **not** need to crawl HTML. The registry is served by a public [Convex](https://www.convex.dev) query (`skills:listPublicPageV4` on the same deployment the site uses).
+Registry data comes from the same Convex API as [clawhub.ai/skills](https://clawhub.ai/skills) (`skills:listPublicPageV4`), not HTML scraping.
 
-From the repo (after `npm run build`):
+**Crawl** (after `npm run build`):
 
 ```bash
-# Fetch every public skill and overwrite clawhub/skills-seed.json + sync the local SQLite catalog
 npx claw-bench clawhub crawl
-
-# Preview how many skills exist (no file write)
 npx claw-bench clawhub crawl --dry-run
-
-# Re-load SQLite from an existing seed file without calling Convex again
 npx claw-bench clawhub crawl --seed-only
-
-# Same order as the site’s “Sort” menu (default: downloads, descending)
 npx claw-bench clawhub crawl --sort stars
 ```
 
-Then download zips and run analysis:
+**Download** — saves zips under **`clawhub/zip/`** (legacy zips in `clawhub/` are moved there on the next `download --all`). Existing non-empty zips are skipped; failed slugs succeed on re-run. Rate limits (HTTP 429) use `Retry-After` and backoff; tune parallelism with **`CLAWHUB_DOWNLOAD_CONCURRENCY`** (default `1`).
+
+**Analyze** — extracts to `clawhub-skills/<slug>/`, static + optional **`--llm`**. **`--cleanup`** drops zip + extract after each skill. Unless **`--no-seed`**, analyze **re-syncs the full seed into SQLite** first (like crawl/download) so `zip_path` matches disk—skip that when you already ran those steps and want to avoid a long upsert pass.
 
 ```bash
 npx claw-bench clawhub download --all
-npx claw-bench clawhub analyze --all
-# optional: delete each zip + extracted folder after analyzing (saves disk; re-download to re-run)
+npx claw-bench clawhub analyze --all --no-seed
+npx claw-bench clawhub analyze --all --llm --no-seed
+# CLAWHUB_LLM_PROVIDER=ollama OLLAMA_ANALYSIS_MODEL=llama3.1:8b npx claw-bench clawhub analyze --all --llm --no-seed
 # npx claw-bench clawhub analyze --all --cleanup
-# optional LLM scores:
-# ANTHROPIC_API_KEY=... npx claw-bench clawhub analyze --all --llm
-# Local Ollama for LLM scores:
-# CLAWHUB_LLM_PROVIDER=ollama OLLAMA_ANALYSIS_MODEL=llama3.2 npx claw-bench clawhub analyze --all --llm
 ```
+
+`npx claw-bench clawhub status` — zips vs seed vs analyzed counts.
 
 **LLM provider for `clawhub analyze --llm`** (`CLAWHUB_LLM_PROVIDER`):
 
@@ -132,19 +127,12 @@ Embeddings for benchmarks still use **Ollama** via `OLLAMA_HOST` and `BENCH_EMBE
 
 #### Catalog composite score (static + LLM)
 
-`clawhub analyze` combines **deterministic static signals** (docs, structure, heuristics) with an optional **LLM rubric** on `SKILL.md`. The **overall** score uses a **weighted composite** of the two—similar in spirit to product “composite evaluators” that merge code/Python checks with LLM or human judges (e.g. weighted averages over child evaluators).
+Overall score blends **static** (deterministic checks on the skill tree) and optional **LLM** (rubric on `SKILL.md`):  
+`overall = w_static × static_composite + w_llm × llm_composite` with defaults **`CLAWHUB_OVERALL_STATIC_WEIGHT=0.6`** and **`CLAWHUB_OVERALL_LLM_WEIGHT=0.4`** (normalized to sum to 1).
 
-- **Single run (one model):**  
-  `overall = w_static × static_composite + w_llm × llm_composite`  
-  Defaults: `w_static = 0.6`, `w_llm = 0.4` (override with `CLAWHUB_OVERALL_STATIC_WEIGHT` / `CLAWHUB_OVERALL_LLM_WEIGHT`; values are normalized to sum to 1).
+Re-run **`analyze --llm`** with different models to accumulate judges; the dashboard/catalog use the **latest row per model**, then combine dimensions with **`CLAWHUB_LLM_AGGREGATE`**: `mean` (default), `median`, `min`, `max`.
 
-- **Multiple models:** Run analysis with different providers/models (separate `clawhub analyze --all --llm` passes). The dashboard and catalog SQL take the **latest row per model name**, then **aggregate** those scores across models using `CLAWHUB_LLM_AGGREGATE`:
-  - `mean` (default): average—smooth, can be pulled by one outlier.
-  - `median`: robust to one outlier judge (per metric).
-  - `min`: conservative—all models must score well.
-  - `max`: optimistic—only the best judge counts (rarely recommended).
-
-**Human evaluation:** There is **no** human-judge path in the tool yet. Automated + LLM scores are useful for triage and comparison, but **targeted human review** (especially for safety, policy, and real-world usefulness) is still the gold standard when you need high-stakes guarantees.
+There is **no human-judge** path in this tool; use LLM + static scores for triage, not as a substitute for human review where it matters.
 
 Override the Convex deployment URL if ClawHub moves (rare):
 
@@ -263,6 +251,9 @@ Query the local benchmark database for analytics.
 | `CLAWHUB_OVERALL_STATIC_WEIGHT` | Catalog overall: weight on **static** composite (with LLM) | `0.6` |
 | `CLAWHUB_OVERALL_LLM_WEIGHT` | Catalog overall: weight on **aggregated LLM** composite | `0.4` |
 | `CLAWHUB_LLM_AGGREGATE` | How to merge multiple LLM models: `mean` \| `median` \| `min` \| `max` | `mean` |
+| `CLAWHUB_DOWNLOAD_CONCURRENCY` | Parallel `clawhub download` workers (lower reduces HTTP 429) | `1` |
+
+Local artifacts (`clawhub/zip/`, `clawhub-skills/`, large `skills-seed.json`, `bench.db`) are **not** meant to be committed—see `.gitignore`.
 
 ## Writing `bench.json`
 
@@ -328,11 +319,12 @@ npx claw-bench dashboard
 
 ### Dashboard features
 
-- **Overview** -- summary stats, score distribution histogram, skills leaderboard, recent runs
-- **Runs Explorer** -- searchable, sortable, filterable table of all runs with expandable detail rows
-- **Skill Detail** -- per-skill radar chart, score drift over time, version deltas, run history
-- **Compare** -- select 2-4 skills for side-by-side radar charts and dimension breakdown
-- **Import** -- drag-and-drop `benchmark-report.json` files to import into the database
+- **Overview** — summary stats, score distribution, skills leaderboard, recent runs
+- **Runs Explorer** — benchmark runs table with detail rows
+- **Skill Detail** — per-skill radar, drift, run history (benchmark DB)
+- **ClawHub Catalog** — seeded/analyzed skills, static + LLM scores; multi-model LLM shows aggregate + per-model breakdown
+- **Compare** — 2–4 skills side-by-side
+- **Import** — `benchmark-report.json` drop-in import
 
 ### Development mode
 
@@ -358,7 +350,7 @@ npm run build
 npm test
 ```
 
-`dist/` is not committed; always run `npm run build` after pulling changes. For the dashboard UI, also run `npm run dashboard:install` and `npm run dashboard:build`.
+`dist/` is not committed; run `npm run build` after pulling. Dashboard: `npm run dashboard:install` and `npm run dashboard:build`. Tests: `npm test` (root) or `npm run test:run` after a build.
 
 ## License
 
