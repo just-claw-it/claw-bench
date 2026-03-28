@@ -134,6 +134,45 @@ Re-run **`analyze --llm`** with different models to accumulate judges; the dashb
 
 There is **no human-judge** path in this tool; use LLM + static scores for triage, not as a substitute for human review where it matters.
 
+#### Catalog analyze: what each score means
+
+`clawhub analyze` scores the **skill package as shipped** (files under the zip). That is **separate** from `claw-bench run`, which scores **runtime behavior** (correctness, consistency, robustness, latency). Catalog scores are best for **discovery and triage**: which skills look documented, safe, and complete enough to download and benchmark properly. A high catalog score does not mean the skill passes `bench.json`; a low score is a signal to fix docs or security before trusting the skill in production.
+
+**Static analysis** (always on) produces five dimensions (each 0–1) and a **static composite** — a weighted sum:
+
+| When script files exist (`.sh` / `.py` / `.js` / `.ts`) | Weight in static composite |
+|----------------------------------------------------------|----------------------------|
+| **doc** (documentation quality) | 30% |
+| **complete** (completeness) | 20% |
+| **security** | 25% |
+| **code** (code quality) | 15% |
+| **maintain** (maintainability) | 10% |
+
+If there are **no** such script files, **code** is omitted (`n/a` in the log) and its 15% is **redistributed** across the others: **doc** 35%, **complete** 24%, **security** 29%, **maintain** 12%.
+
+What each static dimension checks (heuristic, not a formal proof):
+
+| Dimension | What it approximates | Why it matters for benchmarking |
+|-----------|----------------------|----------------------------------|
+| **doc** | `SKILL.md`: YAML frontmatter (`name`, `description`), length, headings, fenced code blocks, usage/install sections, examples, tables. | Agents and humans follow `SKILL.md`; weak docs make correctness runs harder to interpret and increase misuse. |
+| **complete** | Presence of `SKILL.md`, `_meta.json`, semver-like version from registry metadata, scripts/hooks on disk when the doc references them, `references`/`assets`, multiple languages in the tree. | Missing files or version chaos suggest incomplete packages and flaky reproducibility. |
+| **security** | Scans `.sh`, `.py`, `.js`, `.ts`, `.rb`, `.pl`, `.md` for dangerous patterns (e.g. `rm -rf /`, pipe-to-shell), obvious secret-like literals, and some exfiltration-style APIs; score drops per hit. | Skills run in real environments; static signals catch obvious foot-guns before you execute them. **Many issues will be missed** — this is triage, not an audit. |
+| **code** | For each script: shebang / `set -e` / try-catch, comments, reasonable size, CLI help patterns; bonus for `scripts/` or `hooks/` layout. | Executable quality correlates with predictable behavior under `claw-bench run`. |
+| **maintain** | Registry version count, file count and root layout, extra docs folders, download count as a weak popularity proxy. | Frequently updated, bounded packages are easier to track over time (drift, regressions). |
+
+**LLM analysis** (`--llm`) reads `SKILL.md` (truncated for the prompt) and asks the model for four rubric scores (0–1), **equally weighted** in **llm composite** (simple average):
+
+| Dimension | Rubric (from the evaluator prompt) | Why it matters for benchmarking |
+|-----------|--------------------------------------|----------------------------------|
+| **clarity** | Clear structure; an agent could follow without confusion. | Reduces ambiguous instructions that break consistency or robustness tests. |
+| **usefulness** | Practical value; solves a real problem. | Separates placeholder skills from ones worth benchmarking. |
+| **safety** | Credentials handling; dangerous operations and safeguards. | Overlaps *conceptually* with static **security** but judges prose and intent; still not a substitute for review. |
+| **complete** (LLM) | Gaps in install, usage, errors, edge cases. | Complements static **complete** (file checks) with narrative coverage. |
+
+LLM scores are **subjective** and model-dependent; use several models and `CLAWHUB_LLM_AGGREGATE` if you want a stabler signal.
+
+**Overall** catalog score (dashboard / composite): blends **static composite** and **aggregated LLM composite** with `CLAWHUB_OVERALL_STATIC_WEIGHT` / `CLAWHUB_OVERALL_LLM_WEIGHT` (default **60% / 40%**). Without `--llm`, overall equals the static composite for that run.
+
 Override the Convex deployment URL if ClawHub moves (rare):
 
 | Variable | Description | Default |

@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import * as fs from "fs";
 import * as path from "path";
+import { performance } from "node:perf_hooks";
 import { DEFAULT_CONFIG, SkillMetadata } from "./types.js";
 import { benchmark } from "./runner.js";
 import { printReport, writeJsonReport, printComparison } from "./reporter.js";
@@ -593,13 +594,21 @@ clawhub
     "Include LLM evaluation (set CLAWHUB_LLM_PROVIDER + API keys — see README)"
   )
   .option(
+    "--force",
+    "With --llm, re-run LLM even if this slug already has analysis for the current model"
+  )
+  .option(
     "--no-seed",
     "Skip syncing the full seed list into SQLite before analyzing (faster after crawl/download; dashboard zip paths may be stale until next seed)"
   )
   .action(async (slug: string | undefined, opts) => {
     const { loadSeedList, extractSkill, findExistingZip, seedSkillsToDB } = await import("./clawhub.js");
-    const { analyzeSkill } = await import("./clawhub-analyzer.js");
-    const { storeClawHubAnalysis, upsertClawHubSkill } = await import("./store.js");
+    const { analyzeSkill, resolvedCatalogLlmModel } = await import("./clawhub-analyzer.js");
+    const {
+      storeClawHubAnalysis,
+      upsertClawHubSkill,
+      hasClawHubLlmAnalysisForModel,
+    } = await import("./store.js");
 
     const clawhubDir = path.join(process.cwd(), "clawhub");
     const skillsDir = path.join(process.cwd(), "clawhub-skills");
@@ -623,25 +632,47 @@ clawhub
       `\nAnalyzing ${toAnalyze.length} skill(s)${opts.llm ? " (with LLM)" : ""}${opts.cleanup ? " (cleanup after each)" : ""}...\n`
     );
 
+    const llmModel = opts.llm ? resolvedCatalogLlmModel() : "";
     let analyzed = 0;
-    for (const entry of toAnalyze) {
+    const total = toAnalyze.length;
+
+    for (let i = 0; i < toAnalyze.length; i++) {
+      const entry = toAnalyze[i];
+      const k = i + 1;
+      const prog = `[${k}/${total}]`;
+
       const zipPath = findExistingZip(entry.slug, clawhubDir);
       if (!zipPath) {
-        console.log(`  ${entry.slug} — no zip found, skipping`);
+        console.log(`  ${prog} ${entry.slug} — no zip found, skipping`);
+        continue;
+      }
+
+      if (
+        opts.llm &&
+        !opts.force &&
+        (await hasClawHubLlmAnalysisForModel(entry.slug, llmModel))
+      ) {
+        console.log(
+          `  ${prog} ${entry.slug} — already analyzed with LLM model "${llmModel}", skipping (use --force to re-run)`
+        );
         continue;
       }
 
       let extractedDir: string;
+      let extractMs = 0;
       const existing = path.join(skillsDir, entry.slug);
       if (fs.existsSync(existing) && fs.existsSync(path.join(existing, "SKILL.md"))) {
         extractedDir = existing;
       } else {
-        console.log(`  ${entry.slug} — extracting...`);
+        const tEx0 = performance.now();
+        console.log(`  ${prog} ${entry.slug} — extracting...`);
         extractedDir = await extractSkill(zipPath, skillsDir);
+        extractMs = Math.round(performance.now() - tEx0);
       }
 
-      console.log(`  ${entry.slug} — analyzing...`);
+      console.log(`  ${prog} ${entry.slug} — analyzing...`);
       const result = await analyzeSkill(extractedDir, entry.slug, entry, { llm: !!opts.llm });
+      result.timing.extractMs = extractMs;
 
       await upsertClawHubSkill(entry, {
         zipPath,
@@ -656,18 +687,26 @@ clawhub
 
       const s = result.staticAnalysis;
       const pct = (v: number) => `${Math.round(v * 100)}%`;
+      const tm = result.timing;
+      const llmTime =
+        tm.llmMs === null ? "llm=n/a" : `llm=${tm.llmMs}ms`;
       console.log(
-        `    static: doc=${pct(s.docQuality)} complete=${pct(s.completeness)} security=${pct(s.security)} ` +
+        `    ${prog} time: extract=${tm.extractMs}ms static=${tm.staticMs}ms ${llmTime} ` +
+        `fileStats=${tm.fileStatsMs}ms pipeline=${tm.pipelineMs}ms ` +
+        `(total ${tm.extractMs + tm.pipelineMs}ms)`
+      );
+      console.log(
+        `    ${prog} static: doc=${pct(s.docQuality)} complete=${pct(s.completeness)} security=${pct(s.security)} ` +
         `code=${s.codeQuality !== null ? pct(s.codeQuality) : "n/a"} maintain=${pct(s.maintainability)} → ${pct(s.staticComposite)}`
       );
       if (result.llmEval) {
         const l = result.llmEval;
         console.log(
-          `    llm:    clarity=${pct(l.clarity)} useful=${pct(l.usefulness)} safety=${pct(l.safety)} ` +
+          `    ${prog} llm:    clarity=${pct(l.clarity)} useful=${pct(l.usefulness)} safety=${pct(l.safety)} ` +
           `complete=${pct(l.completeness)} → ${pct(l.llmComposite)}`
         );
       }
-      console.log(`    overall: ${pct(result.overallComposite)}`);
+      console.log(`    ${prog} overall: ${pct(result.overallComposite)}`);
 
       if (opts.cleanup) {
         try {
@@ -683,7 +722,7 @@ clawhub
             totalSizeBytes: result.fileStats.totalSizeBytes,
             skillMdLength: result.fileStats.skillMdLength,
           });
-          console.log(`    cleaned up zip + extracted files`);
+          console.log(`    ${prog} cleaned up zip + extracted files`);
         } catch (err) {
           console.warn(
             `    cleanup failed: ${err instanceof Error ? err.message : String(err)}`

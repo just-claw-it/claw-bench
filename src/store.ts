@@ -148,6 +148,11 @@ CREATE TABLE IF NOT EXISTS clawhub_analysis (
   llm_model         TEXT,
   llm_reasoning     TEXT,
   overall_composite REAL    NOT NULL,
+  extract_ms           INTEGER,
+  static_analysis_ms   INTEGER,
+  llm_ms               INTEGER,
+  file_stats_ms        INTEGER,
+  pipeline_ms          INTEGER,
   FOREIGN KEY (slug) REFERENCES clawhub_skills(slug)
 );
 
@@ -164,11 +169,39 @@ CREATE INDEX IF NOT EXISTS idx_clawhub_analysis_slug ON clawhub_analysis(slug);
 
 // ── Migration (idempotent) ─────────────────────────────────────────────────
 
+function clawhubAnalysisColumnNames(db: Database): Set<string> {
+  const names = new Set<string>();
+  const stmt = db.prepare("PRAGMA table_info(clawhub_analysis)");
+  while (stmt.step()) {
+    const row = stmt.getAsObject() as { name?: string };
+    if (row.name) names.add(row.name);
+  }
+  stmt.free();
+  return names;
+}
+
+function ensureClawhubAnalysisTimingColumns(db: Database): void {
+  if (!clawhubAnalysisColumnNames(db).has("slug")) return;
+  const cols = clawhubAnalysisColumnNames(db);
+  const add = (name: string) => {
+    if (!cols.has(name)) {
+      db.run(`ALTER TABLE clawhub_analysis ADD COLUMN ${name} INTEGER`);
+      cols.add(name);
+    }
+  };
+  add("extract_ms");
+  add("static_analysis_ms");
+  add("llm_ms");
+  add("file_stats_ms");
+  add("pipeline_ms");
+}
+
 function migrate(db: Database): void {
   // Drop old install_counts table if it exists from a previous schema version
   db.run(`DROP TABLE IF EXISTS install_counts`);
   // `run()` only executes a single statement; `exec()` applies the full schema.
   db.exec(SCHEMA);
+  ensureClawhubAnalysisTimingColumns(db);
 }
 
 /** Stale -wal / -shm from legacy WAL mode break sql.js opens — safe to remove for this app. */
@@ -504,6 +537,20 @@ export function upsertClawHubSkill(
   });
 }
 
+/** True if we already stored a successful LLM composite for this slug + model (skips redundant `--llm` runs). */
+export async function hasClawHubLlmAnalysisForModel(
+  slug: string,
+  llmModel: string
+): Promise<boolean> {
+  const rows = await query<{ n: number }>(
+    `SELECT 1 AS n FROM clawhub_analysis
+     WHERE slug = ? AND llm_model = ? AND llm_composite IS NOT NULL
+     LIMIT 1`,
+    [slug, llmModel]
+  );
+  return rows.length > 0;
+}
+
 export function storeClawHubAnalysis(analysis: ClawHubAnalysis): Promise<number> {
   return serialize(async () => {
     const SQL = await getSql();
@@ -512,14 +559,16 @@ export function storeClawHubAnalysis(analysis: ClawHubAnalysis): Promise<number>
 
     const s = analysis.staticAnalysis;
     const l = analysis.llmEval;
+    const tm = analysis.timing;
 
     db.run(
       `INSERT INTO clawhub_analysis (
         slug, analyzed_at,
         doc_quality, completeness, security, code_quality, maintainability, static_composite,
         llm_clarity, llm_usefulness, llm_safety, llm_completeness, llm_composite,
-        llm_model, llm_reasoning, overall_composite
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        llm_model, llm_reasoning, overall_composite,
+        extract_ms, static_analysis_ms, llm_ms, file_stats_ms, pipeline_ms
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         analysis.slug,
         analysis.analyzedAt,
@@ -537,6 +586,11 @@ export function storeClawHubAnalysis(analysis: ClawHubAnalysis): Promise<number>
         l?.model ?? null,
         l?.reasoning ?? null,
         analysis.overallComposite,
+        tm.extractMs,
+        tm.staticMs,
+        tm.llmMs,
+        tm.fileStatsMs,
+        tm.pipelineMs,
       ]
     );
 

@@ -227,6 +227,20 @@ export interface LLMEvalResult {
   reasoning: string;
 }
 
+/** Wall-clock milliseconds per analyze pipeline step (logged + stored on `clawhub_analysis`). */
+export interface ClawHubAnalysisTiming {
+  /** Unzip into clawhub-skills; 0 when the skill folder already existed. */
+  extractMs: number;
+  /** Five static analyzers + static composite. */
+  staticMs: number;
+  /** LLM call; null when `--llm` was not used. */
+  llmMs: number | null;
+  /** `collectFileStats` (sync scan). */
+  fileStatsMs: number;
+  /** Wall time for full `analyzeSkill()` (static + optional LLM + file stats). */
+  pipelineMs: number;
+}
+
 /** Combined analysis result for a ClawHub skill. */
 export interface ClawHubAnalysis {
   slug: string;
@@ -241,4 +255,5 @@ export interface ClawHubAnalysis {
     skillMdLength: number;
     languages: string[];
   };
+  timing: ClawHubAnalysisTiming;
 }

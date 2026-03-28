@@ -8,6 +8,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { performance } from "node:perf_hooks";
 import {
   StaticAnalysisResult,
   LLMEvalResult,
@@ -345,6 +346,21 @@ function llmProvider(): "anthropic" | "ollama" | "openai" {
   return "anthropic";
 }
 
+/**
+ * Model id stored in `clawhub_analysis.llm_model` for the current env.
+ * Must stay in sync with `llmEvaluateAnthropic` / `llmEvaluateOllama` / `llmEvaluateOpenAICompatible`.
+ */
+export function resolvedCatalogLlmModel(): string {
+  const p = llmProvider();
+  if (p === "ollama") {
+    return process.env.OLLAMA_ANALYSIS_MODEL ?? process.env.OLLAMA_MODEL ?? "llama3.2";
+  }
+  if (p === "openai") {
+    return process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+  }
+  return process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-20250514";
+}
+
 function buildLlmPrompt(skillMdContent: string, slug: string): string {
   return `You are evaluating an AI agent skill package. The skill is identified by slug "${slug}".
 Below is the SKILL.md content — the primary documentation and instruction file for this skill.
@@ -525,12 +541,19 @@ export async function llmEvaluate(
 
 // ── Full analysis pipeline ─────────────────────────────────────────────────
 
+function msSince(t0: number): number {
+  return Math.round(performance.now() - t0);
+}
+
 export async function analyzeSkill(
   skillDir: string,
   slug: string,
   entry?: ClawHubSkillEntry,
   options: { llm?: boolean } = {}
 ): Promise<ClawHubAnalysis> {
+  const pipelineT0 = performance.now();
+
+  const tStatic0 = performance.now();
   const docQuality = analyzeDocQuality(skillDir);
   const completeness = analyzeCompleteness(skillDir, entry);
   const security = analyzeSecurity(skillDir);
@@ -546,17 +569,25 @@ export async function analyzeSkill(
     staticComposite: 0,
   };
   staticAnalysis.staticComposite = computeStaticComposite(staticAnalysis);
+  const staticMs = msSince(tStatic0);
 
   let llmEval: LLMEvalResult | null = null;
+  let llmMs: number | null = null;
   if (options.llm) {
+    const tLlm0 = performance.now();
     const skillMdPath = path.join(skillDir, "SKILL.md");
     if (fs.existsSync(skillMdPath)) {
       const skillMdContent = fs.readFileSync(skillMdPath, "utf-8");
       llmEval = await llmEvaluate(skillMdContent, slug);
     }
+    llmMs = msSince(tLlm0);
   }
 
+  const tFs0 = performance.now();
   const fileStats = collectFileStats(skillDir);
+  const fileStatsMs = msSince(tFs0);
+
+  const pipelineMs = msSince(pipelineT0);
 
   // Weighted composite: static + LLM (weights from CLAWHUB_OVERALL_* env; default 0.6 / 0.4)
   const overallComposite = computeOverallComposite(
@@ -571,5 +602,12 @@ export async function analyzeSkill(
     llmEval,
     overallComposite,
     fileStats,
+    timing: {
+      extractMs: 0,
+      staticMs,
+      llmMs,
+      fileStatsMs,
+      pipelineMs,
+    },
   };
 }
