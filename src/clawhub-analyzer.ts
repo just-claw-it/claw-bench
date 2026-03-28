@@ -15,6 +15,7 @@ import {
   ClawHubSkillEntry,
 } from "./types.js";
 import { collectFileStats } from "./clawhub.js";
+import { computeOverallComposite } from "./clawhub-scoring.js";
 
 // ── YAML frontmatter parsing ───────────────────────────────────────────────
 
@@ -557,10 +558,11 @@ export async function analyzeSkill(
 
   const fileStats = collectFileStats(skillDir);
 
-  // Overall composite: 60% static + 40% LLM (or 100% static if no LLM)
-  const overallComposite = llmEval
-    ? staticAnalysis.staticComposite * 0.6 + llmEval.llmComposite * 0.4
-    : staticAnalysis.staticComposite;
+  // Weighted composite: static + LLM (weights from CLAWHUB_OVERALL_* env; default 0.6 / 0.4)
+  const overallComposite = computeOverallComposite(
+    staticAnalysis.staticComposite,
+    llmEval?.llmComposite ?? null
+  );
 
   return {
     slug,

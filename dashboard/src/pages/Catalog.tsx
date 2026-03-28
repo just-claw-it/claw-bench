@@ -257,7 +257,7 @@ function SkillCard({ skill }: { skill: CatalogSkill }) {
             className={`text-lg font-bold ${scoreColor(skill.overall_composite)}`}
             title={
               (skill.llm_model_count ?? 0) > 1
-                ? "Uses 60% static + 40% LLM; LLM term is the average across multiple models."
+                ? "Weighted static + LLM (see README); LLM term aggregates multiple models."
                 : undefined
             }
           >
@@ -380,7 +380,7 @@ function SkillTable({
                     className={scoreColor(sk.overall_composite)}
                     title={
                       (sk.llm_model_count ?? 0) > 1
-                        ? "60% static + 40% LLM; LLM term averaged across models."
+                        ? "Weighted static + LLM; LLM term aggregated across models (README)."
                         : undefined
                     }
                   >

@@ -18,6 +18,11 @@ import * as path from "path";
 import * as os from "os";
 import initSqlJs, { type Database, type SqlJsStatic } from "sql.js";
 import { BenchmarkReport, SkillMetadata, ClawHubSkillEntry, ClawHubAnalysis } from "./types.js";
+import {
+  CLAWHUB_LLM_LATEST_PER_MODEL_SUB,
+  buildClawhubLlmAggregateSubquery,
+  clawhubOverallCompositeSqlExpr,
+} from "./clawhub-scoring.js";
 
 // ── DB path ────────────────────────────────────────────────────────────────
 
@@ -559,37 +564,14 @@ const CLAWHUB_LATEST_ANALYSIS_SUB = `
   FROM clawhub_analysis
 `;
 
-/** Latest row per (slug, llm_model) among runs that have LLM scores. */
-const CLAWHUB_LLM_LATEST_PER_MODEL_SUB = `
-  SELECT ca.*,
-    ROW_NUMBER() OVER (
-      PARTITION BY ca.slug, ca.llm_model
-      ORDER BY ca.analyzed_at DESC
-    ) AS rnm
-  FROM clawhub_analysis ca
-  WHERE ca.llm_model IS NOT NULL AND ca.llm_composite IS NOT NULL
-`;
-
-/**
- * Join catalog skills to latest static row + LLM aggregates (avg over distinct models,
- * each model using its latest run). overall_composite = 60% static + 40% avg LLM when LLM data exists.
- */
-const CLAWHUB_ANALYSIS_JOIN = `FROM clawhub_skills s
+function clawhubCatalogAnalysisJoinSql(): string {
+  const llmAgg = buildClawhubLlmAggregateSubquery().trim();
+  return `FROM clawhub_skills s
 LEFT JOIN (
   ${CLAWHUB_LATEST_ANALYSIS_SUB}
 ) latest ON latest.slug = s.slug AND latest.rn = 1
 LEFT JOIN (
-  SELECT
-    lp.slug,
-    COUNT(*) AS llm_model_count,
-    AVG(lp.llm_clarity) AS llm_clarity,
-    AVG(lp.llm_usefulness) AS llm_usefulness,
-    AVG(lp.llm_safety) AS llm_safety,
-    AVG(lp.llm_completeness) AS llm_completeness,
-    AVG(lp.llm_composite) AS llm_composite
-  FROM (${CLAWHUB_LLM_LATEST_PER_MODEL_SUB}) lp
-  WHERE lp.rnm = 1
-  GROUP BY lp.slug
+  ${llmAgg}
 ) llm ON llm.slug = s.slug
 LEFT JOIN (
   SELECT
@@ -609,24 +591,21 @@ LEFT JOIN (
   WHERE lp.rnm = 1
   GROUP BY lp.slug
 ) llm_json ON llm_json.slug = s.slug`;
+}
 
-/** Matches analyzer: 60% static + 40% LLM when aggregated LLM composite exists. */
-const CLAWHUB_OVERALL_EXPR = `CASE
-         WHEN llm.llm_composite IS NOT NULL AND latest.static_composite IS NOT NULL
-           THEN latest.static_composite * 0.6 + llm.llm_composite * 0.4
-         ELSE COALESCE(latest.overall_composite, latest.static_composite)
-       END`;
-
-const CLAWHUB_CATALOG_SELECT = `SELECT s.*,
+function clawhubCatalogSelectSql(): string {
+  const overall = clawhubOverallCompositeSqlExpr();
+  return `SELECT s.*,
        latest.doc_quality, latest.completeness AS completeness_score, latest.security,
        latest.code_quality, latest.maintainability, latest.static_composite,
        llm.llm_clarity, llm.llm_usefulness, llm.llm_safety, llm.llm_completeness,
        llm.llm_composite,
        llm.llm_model_count,
        llm_json.llm_models_json,
-       (${CLAWHUB_OVERALL_EXPR}) AS overall_composite,
+       (${overall}) AS overall_composite,
        (SELECT MAX(ca.analyzed_at) FROM clawhub_analysis ca WHERE ca.slug = s.slug) AS analyzed_at,
        CASE WHEN latest.id IS NOT NULL THEN 1 ELSE 0 END AS analyzed`;
+}
 
 export interface ClawHubCatalogPageOpts {
   page: number;
@@ -638,6 +617,7 @@ export interface ClawHubCatalogPageOpts {
 }
 
 function catalogOrderBy(sort: ClawHubCatalogPageOpts["sort"]): string {
+  const overall = clawhubOverallCompositeSqlExpr();
   switch (sort) {
     case "name":
       return "s.name COLLATE NOCASE ASC";
@@ -646,8 +626,8 @@ function catalogOrderBy(sort: ClawHubCatalogPageOpts["sort"]): string {
     case "stars":
       return "s.stars DESC";
     default:
-      return `CASE WHEN (${CLAWHUB_OVERALL_EXPR}) IS NULL THEN 1 ELSE 0 END,
-              (${CLAWHUB_OVERALL_EXPR}) DESC,
+      return `CASE WHEN (${overall}) IS NULL THEN 1 ELSE 0 END,
+              (${overall}) DESC,
               s.slug ASC`;
   }
 }
@@ -681,8 +661,10 @@ export async function getClawHubSkillsPaged(
   const whereSql = conditions.join(" AND ");
   const orderSql = catalogOrderBy(opts.sort);
 
-  const countSql = `SELECT COUNT(*) as n ${CLAWHUB_ANALYSIS_JOIN} WHERE ${whereSql}`;
-  const dataSql = `${CLAWHUB_CATALOG_SELECT} ${CLAWHUB_ANALYSIS_JOIN} WHERE ${whereSql} ORDER BY ${orderSql} LIMIT ? OFFSET ?`;
+  const joinSql = clawhubCatalogAnalysisJoinSql();
+  const selectSql = clawhubCatalogSelectSql();
+  const countSql = `SELECT COUNT(*) as n ${joinSql} WHERE ${whereSql}`;
+  const dataSql = `${selectSql} ${joinSql} WHERE ${whereSql} ORDER BY ${orderSql} LIMIT ? OFFSET ?`;
 
   const totalRows = await query<{ n: number }>(countSql, params);
   const total = totalRows[0]?.n ?? 0;
@@ -693,15 +675,20 @@ export async function getClawHubSkillsPaged(
 
 /** Full catalog (CLI / legacy); avoid for large DBs — use getClawHubSkillsPaged. */
 export async function getClawHubSkills(): Promise<Record<string, unknown>[]> {
+  const joinSql = clawhubCatalogAnalysisJoinSql();
+  const selectSql = clawhubCatalogSelectSql();
+  const overall = clawhubOverallCompositeSqlExpr();
   return query(
-    `${CLAWHUB_CATALOG_SELECT} ${CLAWHUB_ANALYSIS_JOIN}
-     ORDER BY CASE WHEN (${CLAWHUB_OVERALL_EXPR}) IS NULL THEN 1 ELSE 0 END,
-              (${CLAWHUB_OVERALL_EXPR}) DESC,
+    `${selectSql} ${joinSql}
+     ORDER BY CASE WHEN (${overall}) IS NULL THEN 1 ELSE 0 END,
+              (${overall}) DESC,
               s.slug ASC`
   );
 }
 
 export async function getClawHubSkillDetail(slug: string): Promise<Record<string, unknown> | null> {
+  const llmAgg = buildClawhubLlmAggregateSubquery().trim();
+  const overall = clawhubOverallCompositeSqlExpr();
   const LLM_DETAIL_JSON_SUB = `
     SELECT
       lp.slug,
@@ -732,7 +719,7 @@ export async function getClawHubSkillDetail(slug: string): Promise<Record<string
        detail.llm_models_json,
        latest.llm_model AS llm_model,
        latest.llm_reasoning AS llm_reasoning,
-       (${CLAWHUB_OVERALL_EXPR}) AS overall_composite,
+       (${overall}) AS overall_composite,
        (SELECT MAX(ca.analyzed_at) FROM clawhub_analysis ca WHERE ca.slug = s.slug) AS analyzed_at,
        CASE WHEN latest.id IS NOT NULL THEN 1 ELSE 0 END AS analyzed
      FROM clawhub_skills s
@@ -740,17 +727,7 @@ export async function getClawHubSkillDetail(slug: string): Promise<Record<string
        ${CLAWHUB_LATEST_ANALYSIS_SUB}
      ) latest ON latest.slug = s.slug AND latest.rn = 1
      LEFT JOIN (
-       SELECT
-         lp.slug,
-         COUNT(*) AS llm_model_count,
-         AVG(lp.llm_clarity) AS llm_clarity,
-         AVG(lp.llm_usefulness) AS llm_usefulness,
-         AVG(lp.llm_safety) AS llm_safety,
-         AVG(lp.llm_completeness) AS llm_completeness,
-         AVG(lp.llm_composite) AS llm_composite
-       FROM (${CLAWHUB_LLM_LATEST_PER_MODEL_SUB}) lp
-       WHERE lp.rnm = 1
-       GROUP BY lp.slug
+       ${llmAgg}
      ) llm ON llm.slug = s.slug
      LEFT JOIN (${LLM_DETAIL_JSON_SUB}) detail ON detail.slug = s.slug
      WHERE s.slug = ?`,

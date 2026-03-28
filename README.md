@@ -130,6 +130,22 @@ npx claw-bench clawhub analyze --all
 
 Embeddings for benchmarks still use **Ollama** via `OLLAMA_HOST` and `BENCH_EMBED_MODEL` — separate from catalog LLM analysis.
 
+#### Catalog composite score (static + LLM)
+
+`clawhub analyze` combines **deterministic static signals** (docs, structure, heuristics) with an optional **LLM rubric** on `SKILL.md`. The **overall** score uses a **weighted composite** of the two—similar in spirit to product “composite evaluators” that merge code/Python checks with LLM or human judges (e.g. weighted averages over child evaluators).
+
+- **Single run (one model):**  
+  `overall = w_static × static_composite + w_llm × llm_composite`  
+  Defaults: `w_static = 0.6`, `w_llm = 0.4` (override with `CLAWHUB_OVERALL_STATIC_WEIGHT` / `CLAWHUB_OVERALL_LLM_WEIGHT`; values are normalized to sum to 1).
+
+- **Multiple models:** Run analysis with different providers/models (separate `clawhub analyze --all --llm` passes). The dashboard and catalog SQL take the **latest row per model name**, then **aggregate** those scores across models using `CLAWHUB_LLM_AGGREGATE`:
+  - `mean` (default): average—smooth, can be pulled by one outlier.
+  - `median`: robust to one outlier judge (per metric).
+  - `min`: conservative—all models must score well.
+  - `max`: optimistic—only the best judge counts (rarely recommended).
+
+**Human evaluation:** There is **no** human-judge path in the tool yet. Automated + LLM scores are useful for triage and comparison, but **targeted human review** (especially for safety, policy, and real-world usefulness) is still the gold standard when you need high-stakes guarantees.
+
 Override the Convex deployment URL if ClawHub moves (rare):
 
 | Variable | Description | Default |
@@ -244,6 +260,9 @@ Query the local benchmark database for analytics.
 | `OPENAI_API_KEY` | OpenAI-compatible `chat/completions` for catalog `--llm` | — |
 | `OPENAI_BASE_URL` | OpenAI-compatible API base | `https://api.openai.com/v1` |
 | `OPENAI_MODEL` | OpenAI-compatible model id | `gpt-4o-mini` |
+| `CLAWHUB_OVERALL_STATIC_WEIGHT` | Catalog overall: weight on **static** composite (with LLM) | `0.6` |
+| `CLAWHUB_OVERALL_LLM_WEIGHT` | Catalog overall: weight on **aggregated LLM** composite | `0.4` |
+| `CLAWHUB_LLM_AGGREGATE` | How to merge multiple LLM models: `mean` \| `median` \| `min` \| `max` | `mean` |
 
 ## Writing `bench.json`
 

@@ -91,8 +91,8 @@ export default function SkillAnalysis() {
               <p className="text-xs text-slate-400 mt-2">
                 {hasLLM
                   ? llmMulti
-                    ? `60% static + 40% LLM (LLM term = average of ${skill.llm_model_count ?? llmModels.length} models)`
-                    : "60% static + 40% LLM"
+                    ? `Weighted static + LLM (LLM term aggregates ${skill.llm_model_count ?? llmModels.length} models; see README)`
+                    : "Weighted static + LLM (defaults in README)"
                   : "100% static analysis"}
               </p>
             </div>
