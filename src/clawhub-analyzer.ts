@@ -14,6 +14,7 @@ import {
   LLMEvalResult,
   ClawHubAnalysis,
   ClawHubSkillEntry,
+  ClawHubSourceInsights,
 } from "./types.js";
 import { collectFileStats } from "./clawhub.js";
 import { computeOverallComposite } from "./clawhub-scoring.js";
@@ -165,10 +166,22 @@ const EXFILTRATION_PATTERNS = [
   /navigator\.sendBeacon/,
 ];
 
-export function analyzeSecurity(skillDir: string): number {
-  let issues = 0;
+interface SecurityScanResult {
+  filesScanned: number;
+  dangerousMatches: number;
+  secretMatches: number;
+  exfiltrationMatches: number;
+  flaggedFiles: string[];
+  score: number;
+}
+
+function scanSecurity(skillDir: string): SecurityScanResult {
+  let dangerousMatches = 0;
+  let secretMatches = 0;
+  let exfiltrationMatches = 0;
   let filesScanned = 0;
   const scanExtensions = new Set([".sh", ".py", ".js", ".ts", ".rb", ".pl", ".md"]);
+  const flaggedFiles = new Set<string>();
 
   const walk = (dir: string, depth = 0) => {
     if (depth > 10) return;
@@ -185,13 +198,22 @@ export function analyzeSecurity(skillDir: string): number {
         const content = fs.readFileSync(full, "utf-8");
 
         for (const pattern of DANGEROUS_PATTERNS) {
-          if (pattern.test(content)) issues++;
+          if (pattern.test(content)) {
+            dangerousMatches++;
+            flaggedFiles.add(path.relative(skillDir, full));
+          }
         }
         for (const pattern of SECRET_PATTERNS) {
-          if (pattern.test(content)) issues += 2;
+          if (pattern.test(content)) {
+            secretMatches++;
+            flaggedFiles.add(path.relative(skillDir, full));
+          }
         }
         for (const pattern of EXFILTRATION_PATTERNS) {
-          if (pattern.test(content)) issues++;
+          if (pattern.test(content)) {
+            exfiltrationMatches++;
+            flaggedFiles.add(path.relative(skillDir, full));
+          }
         }
       }
     }
@@ -199,9 +221,30 @@ export function analyzeSecurity(skillDir: string): number {
 
   walk(skillDir);
 
-  if (filesScanned === 0) return 1.0;
+  if (filesScanned === 0) {
+    return {
+      filesScanned: 0,
+      dangerousMatches: 0,
+      secretMatches: 0,
+      exfiltrationMatches: 0,
+      flaggedFiles: [],
+      score: 1.0,
+    };
+  }
+  const issues = dangerousMatches + exfiltrationMatches + secretMatches * 2;
   // Deduct 0.15 per issue, floor at 0
-  return Math.max(0, 1 - issues * 0.15);
+  return {
+    filesScanned,
+    dangerousMatches,
+    secretMatches,
+    exfiltrationMatches,
+    flaggedFiles: [...flaggedFiles].sort(),
+    score: Math.max(0, 1 - issues * 0.15),
+  };
+}
+
+export function analyzeSecurity(skillDir: string): number {
+  return scanSecurity(skillDir).score;
 }
 
 // ── Code Quality (0–1 or null) ─────────────────────────────────────────────
@@ -314,6 +357,251 @@ function parseDownloads(s: string): number {
   return match[2] ? num * 1000 : num;
 }
 
+// ── Source insights (complexity, language fit, security findings) ──────────
+
+function inferLanguageFromExt(ext: string): string | null {
+  const map: Record<string, string> = {
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".jsx": "javascript",
+    ".sh": "shell",
+    ".rb": "ruby",
+    ".go": "go",
+    ".java": "java",
+    ".rs": "rust",
+    ".php": "php",
+    ".cs": "csharp",
+    ".cpp": "cpp",
+    ".c": "c",
+    ".swift": "swift",
+    ".kt": "kotlin",
+    ".sql": "sql",
+  };
+  return map[ext] ?? null;
+}
+
+function sourceInsights(skillDir: string): ClawHubSourceInsights {
+  const languageCounts = new Map<string, number>();
+  let scriptFiles = 0;
+  let totalLoc = 0;
+  let maxFileLoc = 0;
+  const envVarsUsed = new Set<string>();
+  const textExt = new Set([
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".sh", ".rb", ".go", ".java", ".rs", ".php", ".cs",
+    ".cpp", ".c", ".swift", ".kt", ".sql", ".md", ".yml", ".yaml", ".json", ".toml", ".ini",
+  ]);
+
+  const walk = (dir: string, depth = 0) => {
+    if (depth > 10) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === "node_modules" || entry.name === ".git") continue;
+      if (entry.isSymbolicLink()) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full, depth + 1);
+        continue;
+      }
+      const ext = path.extname(entry.name).toLowerCase();
+      const lang = inferLanguageFromExt(ext);
+      if (lang) {
+        languageCounts.set(lang, (languageCounts.get(lang) ?? 0) + 1);
+        if (["python", "javascript", "typescript", "shell", "ruby"].includes(lang)) {
+          scriptFiles++;
+        }
+      }
+      if (!textExt.has(ext)) continue;
+      try {
+        const content = fs.readFileSync(full, "utf-8");
+        const loc = content.length > 0 ? content.split(/\r?\n/).length : 0;
+        totalLoc += loc;
+        if (loc > maxFileLoc) maxFileLoc = loc;
+        for (const m of content.matchAll(/process\.env\.([A-Z_][A-Z0-9_]*)/g)) {
+          envVarsUsed.add(m[1]);
+        }
+        for (const m of content.matchAll(/(?:\$\{|\$)([A-Z_][A-Z0-9_]*)/g)) {
+          envVarsUsed.add(m[1]);
+        }
+      } catch {
+        // Ignore unreadable/binary edge cases for insight heuristics.
+      }
+    }
+  };
+  walk(skillDir);
+
+  const languageBreakdown = [...languageCounts.entries()]
+    .map(([language, files]) => ({ language, files }))
+    .sort((a, b) => b.files - a.files || a.language.localeCompare(b.language));
+  const primaryLanguage = languageBreakdown[0]?.language ?? null;
+
+  const complexity: ClawHubSourceInsights["complexity"] =
+    scriptFiles === 0
+      ? "unknown"
+      : totalLoc < 200 && scriptFiles <= 3
+      ? "simple"
+      : totalLoc < 1200 && scriptFiles <= 15
+      ? "moderate"
+      : "complex";
+
+  const skillMdPath = path.join(skillDir, "SKILL.md");
+  const md = fs.existsSync(skillMdPath) ? fs.readFileSync(skillMdPath, "utf-8").toLowerCase() : "";
+  const detectIfMentioned = (lang: string): boolean => {
+    const aliases: Record<string, string[]> = {
+      javascript: ["javascript", "node", "node.js", "js"],
+      typescript: ["typescript", "ts", "tsx"],
+      python: ["python", "py"],
+      shell: ["shell", "bash", "sh"],
+      csharp: ["c#", "csharp", ".net", "dotnet"],
+      cpp: ["c++", "cpp"],
+    };
+    const words = aliases[lang] ?? [lang];
+    return words.some((w) => md.includes(w));
+  };
+
+  const describedLanguages = languageBreakdown
+    .map((x) => x.language)
+    .filter((lang) => detectIfMentioned(lang));
+  const undocumentedLanguages = languageBreakdown
+    .map((x) => x.language)
+    .filter((lang) => !detectIfMentioned(lang));
+  const mentionedCandidates = [
+    "python", "javascript", "typescript", "shell", "ruby", "go", "java", "rust",
+    "php", "csharp", "cpp", "sql",
+  ].filter((lang) => detectIfMentioned(lang));
+  const missingFromCode = mentionedCandidates.filter((lang) => !languageCounts.has(lang));
+
+  const credentialSuffixes = [
+    "_API_KEY", "_SECRET", "_TOKEN", "_PASSWORD", "_PRIVATE_KEY",
+    "_ACCESS_KEY", "_AUTH_KEY", "_CLIENT_SECRET", "_SIGNING_KEY",
+    "_WEBHOOK_SECRET", "_BEARER",
+  ];
+  const isLikelyCredential = (name: string): boolean =>
+    credentialSuffixes.some((s) => name.toUpperCase().endsWith(s));
+  const observedCredentialVars = [...envVarsUsed]
+    .filter((v) => isLikelyCredential(v))
+    .sort();
+
+  const skillJsonPath = path.join(skillDir, "skill.json");
+  let declaredCredentialVars: string[] = [];
+  if (fs.existsSync(skillJsonPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(skillJsonPath, "utf-8")) as {
+        credentialVars?: unknown;
+      };
+      if (Array.isArray(parsed.credentialVars)) {
+        declaredCredentialVars = parsed.credentialVars
+          .filter((x): x is string => typeof x === "string")
+          .map((x) => x.trim())
+          .filter(Boolean)
+          .map((x) => x.toUpperCase())
+          .sort();
+      }
+    } catch {
+      // ignore invalid skill.json; other analyzers already capture quality signals
+    }
+  }
+  const observedUpper = observedCredentialVars.map((v) => v.toUpperCase());
+  const undeclaredCredentialVars = observedCredentialVars
+    .filter((v) => !declaredCredentialVars.includes(v.toUpperCase()))
+    .sort();
+  const declaredButUnusedCredentialVars = declaredCredentialVars
+    .filter((v) => !observedUpper.includes(v))
+    .sort();
+
+  const envExampleCandidates = [
+    path.join(skillDir, ".env.example"),
+    path.join(skillDir, ".env.sample"),
+    path.join(skillDir, ".env.template"),
+  ];
+  const envExamplePath = envExampleCandidates.find((p) => fs.existsSync(p));
+  let hasEnvExample = false;
+  let envExampleVars = new Set<string>();
+  if (envExamplePath) {
+    hasEnvExample = true;
+    try {
+      const envTxt = fs.readFileSync(envExamplePath, "utf-8");
+      envExampleVars = new Set(
+        [...envTxt.matchAll(/^\s*([A-Z_][A-Z0-9_]*)\s*=/gm)].map((m) => m[1].toUpperCase())
+      );
+    } catch {
+      // ignore unreadable env template
+    }
+  }
+  const coverageBase = new Set([...declaredCredentialVars, ...observedUpper]);
+  let covered = 0;
+  for (const v of coverageBase) {
+    if (envExampleVars.has(v)) covered++;
+  }
+  const envExampleCoverage =
+    coverageBase.size === 0 ? 1 : covered / coverageBase.size;
+
+  const sec = scanSecurity(skillDir);
+  // Credential hygiene composite (0..1; higher is better).
+  const undeclaredPenalty = Math.min(1, undeclaredCredentialVars.length * 0.25);
+  const declaredUnusedPenalty = Math.min(1, declaredButUnusedCredentialVars.length * 0.15);
+  const envCoveragePenalty = 1 - envExampleCoverage;
+  const leakPenalty = Math.min(1, sec.secretMatches * 0.2 + sec.exfiltrationMatches * 0.25);
+  const hygieneScoreRaw =
+    1 -
+    (undeclaredPenalty * 0.35 +
+      declaredUnusedPenalty * 0.15 +
+      envCoveragePenalty * 0.25 +
+      leakPenalty * 0.25);
+  const hygieneScore = Math.max(0, Math.min(1, hygieneScoreRaw));
+  const hygieneLevel: "good" | "warn" | "risk" =
+    hygieneScore >= 0.75 ? "good" : hygieneScore >= 0.5 ? "warn" : "risk";
+
+  return {
+    complexity,
+    scriptFiles,
+    totalLoc,
+    maxFileLoc,
+    primaryLanguage,
+    languageBreakdown,
+    describedLanguages,
+    undocumentedLanguages,
+    missingFromCode,
+    credentialHygiene: {
+      declaredCredentialVars,
+      observedCredentialVars,
+      undeclaredCredentialVars,
+      declaredButUnusedCredentialVars,
+      hasEnvExample,
+      envExampleCoverage,
+      hygieneScore,
+      hygieneLevel,
+    },
+    securityFindings: {
+      filesScanned: sec.filesScanned,
+      dangerousMatches: sec.dangerousMatches,
+      secretMatches: sec.secretMatches,
+      exfiltrationMatches: sec.exfiltrationMatches,
+      flaggedFiles: sec.flaggedFiles,
+      potentialDataLeakage: sec.secretMatches > 0 || sec.exfiltrationMatches > 0,
+    },
+  };
+}
+
+function sourceSummaryForLlm(insights: ClawHubSourceInsights): string {
+  const langs = insights.languageBreakdown
+    .slice(0, 6)
+    .map((x) => `${x.language}:${x.files}`)
+    .join(", ");
+  return [
+    `complexity=${insights.complexity}`,
+    `scriptFiles=${insights.scriptFiles}`,
+    `totalLoc=${insights.totalLoc}`,
+    `maxFileLoc=${insights.maxFileLoc}`,
+    `primaryLanguage=${insights.primaryLanguage ?? "n/a"}`,
+    `languageBreakdown=${langs || "n/a"}`,
+    `undocumentedLanguages=${insights.undocumentedLanguages.join(",") || "none"}`,
+    `missingFromCode=${insights.missingFromCode.join(",") || "none"}`,
+    `credentialHygiene: score=${Math.round(insights.credentialHygiene.hygieneScore * 100)}% level=${insights.credentialHygiene.hygieneLevel} declared=${insights.credentialHygiene.declaredCredentialVars.join(",") || "none"} observed=${insights.credentialHygiene.observedCredentialVars.join(",") || "none"} undeclared=${insights.credentialHygiene.undeclaredCredentialVars.join(",") || "none"} envExampleCoverage=${Math.round(insights.credentialHygiene.envExampleCoverage * 100)}%`,
+    `security: scanned=${insights.securityFindings.filesScanned} dangerous=${insights.securityFindings.dangerousMatches} secrets=${insights.securityFindings.secretMatches} exfiltration=${insights.securityFindings.exfiltrationMatches}`,
+  ].join("\n");
+}
+
 // ── Static composite ──────────────────────────────────────────────────────
 
 export function computeStaticComposite(result: StaticAnalysisResult): number {
@@ -361,7 +649,7 @@ export function resolvedCatalogLlmModel(): string {
   return process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-20250514";
 }
 
-function buildLlmPrompt(skillMdContent: string, slug: string): string {
+function buildLlmPrompt(skillMdContent: string, slug: string, sourceContext: string): string {
   return `You are evaluating an AI agent skill package. The skill is identified by slug "${slug}".
 Below is the SKILL.md content — the primary documentation and instruction file for this skill.
 
@@ -369,12 +657,25 @@ Below is the SKILL.md content — the primary documentation and instruction file
 ${skillMdContent.slice(0, 8000)}
 </skill_md>
 
-Evaluate this skill on 4 dimensions, each scored 0.0 to 1.0:
+Below is a static source-code summary for context.
+
+<source_summary>
+${sourceContext}
+</source_summary>
+
+Evaluate this skill on 4 core dimensions, each scored 0.0 to 1.0:
 
 1. **clarity** — How clear, well-structured, and understandable are the instructions? Consider readability, logical organization, and whether an AI agent could follow them without confusion.
 2. **usefulness** — How practical and valuable is this skill? Does it solve a real problem? Would developers/agents benefit from it?
 3. **safety** — Are there any security concerns? Does it handle credentials properly? Any dangerous operations without safeguards?
 4. **completeness** — Does it cover all necessary information? Are there gaps in installation, usage, error handling, or edge cases?
+
+Also provide an OPTIONAL source-audit block (0.0 to 1.0):
+- alignment: how well SKILL.md claims match the code summary
+- security: code-level security posture
+- privacy: privacy/data-minimization posture
+- leakageRisk: risk of accidental credential/data leakage
+- notes: 1-2 sentences for this audit
 
 Respond with ONLY valid JSON in this exact format:
 {
@@ -382,7 +683,14 @@ Respond with ONLY valid JSON in this exact format:
   "usefulness": 0.0,
   "safety": 0.0,
   "completeness": 0.0,
-  "reasoning": "Brief 2-3 sentence explanation of the scores."
+  "reasoning": "Brief 2-3 sentence explanation of the scores.",
+  "source_audit": {
+    "alignment": 0.0,
+    "security": 0.0,
+    "privacy": 0.0,
+    "leakageRisk": 0.0,
+    "notes": "Optional short note"
+  }
 }`;
 }
 
@@ -399,6 +707,13 @@ function parseLlmJsonResponse(text: string, slug: string, model: string): LLMEva
     safety: number;
     completeness: number;
     reasoning: string;
+    source_audit?: {
+      alignment?: number;
+      security?: number;
+      privacy?: number;
+      leakageRisk?: number;
+      notes?: string;
+    };
   };
 
   const clamp = (v: number) => Math.max(0, Math.min(1, v));
@@ -406,6 +721,16 @@ function parseLlmJsonResponse(text: string, slug: string, model: string): LLMEva
   const u = clamp(parsed.usefulness);
   const s = clamp(parsed.safety);
   const comp = clamp(parsed.completeness);
+
+  const sourceAudit = parsed.source_audit
+    ? {
+        alignment: clamp(parsed.source_audit.alignment ?? 0),
+        security: clamp(parsed.source_audit.security ?? 0),
+        privacy: clamp(parsed.source_audit.privacy ?? 0),
+        leakageRisk: clamp(parsed.source_audit.leakageRisk ?? 0),
+        notes: parsed.source_audit.notes ?? "",
+      }
+    : undefined;
 
   return {
     clarity: c,
@@ -415,6 +740,7 @@ function parseLlmJsonResponse(text: string, slug: string, model: string): LLMEva
     llmComposite: (c + u + s + comp) / 4,
     model,
     reasoning: parsed.reasoning ?? "",
+    sourceAudit,
   };
 }
 
@@ -520,9 +846,10 @@ async function llmEvaluateOpenAICompatible(
 
 export async function llmEvaluate(
   skillMdContent: string,
-  slug: string
+  slug: string,
+  sourceContext = ""
 ): Promise<LLMEvalResult | null> {
-  const prompt = buildLlmPrompt(skillMdContent, slug);
+  const prompt = buildLlmPrompt(skillMdContent, slug, sourceContext);
 
   try {
     const provider = llmProvider();
@@ -571,6 +898,11 @@ export async function analyzeSkill(
   staticAnalysis.staticComposite = computeStaticComposite(staticAnalysis);
   const staticMs = msSince(tStatic0);
 
+  const tFs0 = performance.now();
+  const fileStats = collectFileStats(skillDir);
+  const fileStatsMs = msSince(tFs0);
+  const insights = sourceInsights(skillDir);
+
   let llmEval: LLMEvalResult | null = null;
   let llmMs: number | null = null;
   if (options.llm) {
@@ -578,14 +910,13 @@ export async function analyzeSkill(
     const skillMdPath = path.join(skillDir, "SKILL.md");
     if (fs.existsSync(skillMdPath)) {
       const skillMdContent = fs.readFileSync(skillMdPath, "utf-8");
-      llmEval = await llmEvaluate(skillMdContent, slug);
+      llmEval = await llmEvaluate(skillMdContent, slug, sourceSummaryForLlm(insights));
+      if (llmEval?.sourceAudit) {
+        insights.llmAssistedAudit = llmEval.sourceAudit;
+      }
     }
     llmMs = msSince(tLlm0);
   }
-
-  const tFs0 = performance.now();
-  const fileStats = collectFileStats(skillDir);
-  const fileStatsMs = msSince(tFs0);
 
   const pipelineMs = msSince(pipelineT0);
 
@@ -602,6 +933,7 @@ export async function analyzeSkill(
     llmEval,
     overallComposite,
     fileStats,
+    insights,
     timing: {
       extractMs: 0,
       staticMs,

@@ -153,6 +153,7 @@ CREATE TABLE IF NOT EXISTS clawhub_analysis (
   llm_ms               INTEGER,
   file_stats_ms        INTEGER,
   pipeline_ms          INTEGER,
+  analysis_insights    TEXT,
   FOREIGN KEY (slug) REFERENCES clawhub_skills(slug)
 );
 
@@ -194,6 +195,7 @@ function ensureClawhubAnalysisTimingColumns(db: Database): void {
   add("llm_ms");
   add("file_stats_ms");
   add("pipeline_ms");
+  add("analysis_insights");
 }
 
 function migrate(db: Database): void {
@@ -229,8 +231,69 @@ async function getSql(): Promise<SqlJsStatic> {
 
 let _dbLock: Promise<unknown> = Promise.resolve();
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function acquireProcessDbLock(dbFilePath: string): Promise<() => void> {
+  const lockPath = `${dbFilePath}.lock`;
+  const retryMs = Math.max(25, parseInt(process.env.CLAW_BENCH_DB_LOCK_RETRY_MS ?? "100", 10) || 100);
+  const staleMs = Math.max(10_000, parseInt(process.env.CLAW_BENCH_DB_LOCK_STALE_MS ?? "21600000", 10) || 21_600_000); // 6h
+  const timeoutMs = Math.max(0, parseInt(process.env.CLAW_BENCH_DB_LOCK_TIMEOUT_MS ?? "0", 10) || 0); // 0 = wait forever
+  const started = Date.now();
+
+  while (true) {
+    try {
+      const dir = path.dirname(dbFilePath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const fd = fs.openSync(lockPath, "wx");
+      fs.writeFileSync(
+        fd,
+        JSON.stringify({ pid: process.pid, started_at: new Date().toISOString(), db: dbFilePath })
+      );
+      fs.closeSync(fd);
+      return () => {
+        try {
+          if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+        } catch {
+          /* ignore */
+        }
+      };
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code !== "EEXIST") throw err;
+
+      try {
+        const st = fs.statSync(lockPath);
+        if (Date.now() - st.mtimeMs > staleMs) {
+          fs.unlinkSync(lockPath);
+          continue;
+        }
+      } catch {
+        // lock disappeared between checks; retry quickly
+        continue;
+      }
+
+      if (timeoutMs > 0 && Date.now() - started > timeoutMs) {
+        throw new Error(
+          `Timed out waiting for DB lock: ${lockPath} (timeout ${timeoutMs}ms). ` +
+          `Set CLAW_BENCH_DB_LOCK_TIMEOUT_MS=0 to wait indefinitely.`
+        );
+      }
+      await sleep(retryMs);
+    }
+  }
+}
+
 function serialize<T>(fn: () => Promise<T>): Promise<T> {
-  const p = _dbLock.then(fn);
+  const p = _dbLock.then(async () => {
+    const release = await acquireProcessDbLock(dbPath());
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  });
   _dbLock = p.catch(() => {});
   return p;
 }
@@ -583,6 +646,44 @@ export function deleteClawHubAnalysisForSlugs(slugs: string[]): Promise<void> {
   });
 }
 
+/** Remove analysis rows for one LLM model across all slugs. */
+export function deleteAllClawHubAnalysisForModel(llmModel: string): Promise<void> {
+  return serialize(async () => {
+    const SQL = await getSql();
+    const fp = dbPath();
+    if (!fs.existsSync(fp)) return;
+    const db = loadDb(SQL, fp);
+    db.run("DELETE FROM clawhub_analysis WHERE llm_model = ?", [llmModel]);
+    saveDb(db, fp);
+    db.close();
+  });
+}
+
+/** Remove analysis rows for specific slugs, but only for one LLM model. */
+export function deleteClawHubAnalysisForSlugsAndModel(
+  slugs: string[],
+  llmModel: string
+): Promise<void> {
+  if (slugs.length === 0) return Promise.resolve();
+  return serialize(async () => {
+    const SQL = await getSql();
+    const fp = dbPath();
+    if (!fs.existsSync(fp)) return;
+    const db = loadDb(SQL, fp);
+    const chunk = 400;
+    for (let i = 0; i < slugs.length; i += chunk) {
+      const part = slugs.slice(i, i + chunk);
+      const placeholders = part.map(() => "?").join(",");
+      db.run(
+        `DELETE FROM clawhub_analysis WHERE llm_model = ? AND slug IN (${placeholders})`,
+        [llmModel, ...part]
+      );
+    }
+    saveDb(db, fp);
+    db.close();
+  });
+}
+
 export function storeClawHubAnalysis(analysis: ClawHubAnalysis): Promise<number> {
   return serialize(async () => {
     const SQL = await getSql();
@@ -592,6 +693,7 @@ export function storeClawHubAnalysis(analysis: ClawHubAnalysis): Promise<number>
     const s = analysis.staticAnalysis;
     const l = analysis.llmEval;
     const tm = analysis.timing;
+    const insightsJson = analysis.insights ? JSON.stringify(analysis.insights) : null;
 
     db.run(
       `INSERT INTO clawhub_analysis (
@@ -599,8 +701,9 @@ export function storeClawHubAnalysis(analysis: ClawHubAnalysis): Promise<number>
         doc_quality, completeness, security, code_quality, maintainability, static_composite,
         llm_clarity, llm_usefulness, llm_safety, llm_completeness, llm_composite,
         llm_model, llm_reasoning, overall_composite,
-        extract_ms, static_analysis_ms, llm_ms, file_stats_ms, pipeline_ms
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        extract_ms, static_analysis_ms, llm_ms, file_stats_ms, pipeline_ms,
+        analysis_insights
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         analysis.slug,
         analysis.analyzedAt,
@@ -623,6 +726,7 @@ export function storeClawHubAnalysis(analysis: ClawHubAnalysis): Promise<number>
         tm.llmMs,
         tm.fileStatsMs,
         tm.pipelineMs,
+        insightsJson,
       ]
     );
 

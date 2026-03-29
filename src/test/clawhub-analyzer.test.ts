@@ -217,6 +217,80 @@ ok
     assert.ok(out.timing.fileStatsMs >= 0);
     assert.equal(out.timing.extractMs, 0);
     assert.ok(out.staticAnalysis.staticComposite >= 0 && out.staticAnalysis.staticComposite <= 1);
+    assert.ok(out.insights);
+    const ins = out.insights!;
+    assert.ok(["simple", "moderate", "complex", "unknown"].includes(ins.complexity));
+    assert.ok(ins.credentialHygiene.hygieneScore >= 0 && ins.credentialHygiene.hygieneScore <= 1);
+    assert.ok(["good", "warn", "risk"].includes(ins.credentialHygiene.hygieneLevel));
+    fs.rmSync(dir, { recursive: true });
+  });
+});
+
+describe("source insights: credential hygiene", () => {
+  it("detects observed credential vars and undeclared mismatch", async () => {
+    const dir = tmpSkillDir({
+      "SKILL.md": "# test",
+      "skill.json": JSON.stringify({
+        name: "t",
+        description: "d",
+        type: "linear",
+        entrypoint: "index.js",
+        credentialVars: ["OPENAI_API_KEY"],
+      }),
+      "index.js": `
+const a = process.env.OPENAI_API_KEY;
+const b = process.env.STRIPE_SECRET;
+`,
+      ".env.example": "OPENAI_API_KEY=\n",
+    });
+
+    const out = await analyzeSkill(dir, "fixture-skill", minimalEntry, { llm: false });
+    const h = out.insights!.credentialHygiene;
+    assert.ok(h.observedCredentialVars.includes("OPENAI_API_KEY"));
+    assert.ok(h.observedCredentialVars.includes("STRIPE_SECRET"));
+    assert.ok(h.undeclaredCredentialVars.includes("STRIPE_SECRET"));
+    assert.equal(h.declaredButUnusedCredentialVars.length, 0);
+    assert.equal(h.hasEnvExample, true);
+    assert.ok(h.envExampleCoverage > 0 && h.envExampleCoverage < 1);
+    fs.rmSync(dir, { recursive: true });
+  });
+
+  it("declared but unused credential vars are flagged", async () => {
+    const dir = tmpSkillDir({
+      "SKILL.md": "# test",
+      "skill.json": JSON.stringify({
+        name: "t",
+        description: "d",
+        type: "linear",
+        entrypoint: "index.js",
+        credentialVars: ["GITHUB_TOKEN"],
+      }),
+      "index.js": "console.log('no creds');\n",
+      ".env.example": "GITHUB_TOKEN=\n",
+    });
+    const out = await analyzeSkill(dir, "fixture-skill", minimalEntry, { llm: false });
+    const h = out.insights!.credentialHygiene;
+    assert.ok(h.declaredButUnusedCredentialVars.includes("GITHUB_TOKEN"));
+    assert.equal(h.undeclaredCredentialVars.length, 0);
+    fs.rmSync(dir, { recursive: true });
+  });
+});
+
+describe("analyzeSkill with llm flag but missing SKILL.md", () => {
+  it("keeps llmEval null and llmMs measured", async () => {
+    const dir = tmpSkillDir({
+      "index.js": "console.log('x');",
+      "skill.json": JSON.stringify({
+        name: "t",
+        description: "d",
+        type: "linear",
+        entrypoint: "index.js",
+      }),
+    });
+    const out = await analyzeSkill(dir, "fixture-skill", minimalEntry, { llm: true });
+    assert.equal(out.llmEval, null);
+    assert.ok(out.timing.llmMs !== null);
+    assert.ok(out.insights?.credentialHygiene);
     fs.rmSync(dir, { recursive: true });
   });
 });

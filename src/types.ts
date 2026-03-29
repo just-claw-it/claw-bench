@@ -225,6 +225,13 @@ export interface LLMEvalResult {
   llmComposite: number;
   model: string;
   reasoning: string;
+  sourceAudit?: {
+    alignment: number;
+    security: number;
+    privacy: number;
+    leakageRisk: number;
+    notes: string;
+  };
 }
 
 /** Wall-clock milliseconds per analyze pipeline step (logged + stored on `clawhub_analysis`). */
@@ -239,6 +246,44 @@ export interface ClawHubAnalysisTiming {
   fileStatsMs: number;
   /** Wall time for full `analyzeSkill()` (static + optional LLM + file stats). */
   pipelineMs: number;
+}
+
+/** Extra source-level attributes for discovery/triage (heuristic, not formal verification). */
+export interface ClawHubSourceInsights {
+  complexity: "simple" | "moderate" | "complex" | "unknown";
+  scriptFiles: number;
+  totalLoc: number;
+  maxFileLoc: number;
+  primaryLanguage: string | null;
+  languageBreakdown: Array<{ language: string; files: number }>;
+  describedLanguages: string[];
+  undocumentedLanguages: string[];
+  missingFromCode: string[];
+  credentialHygiene: {
+    declaredCredentialVars: string[];
+    observedCredentialVars: string[];
+    undeclaredCredentialVars: string[];
+    declaredButUnusedCredentialVars: string[];
+    hasEnvExample: boolean;
+    envExampleCoverage: number;
+    hygieneScore: number;
+    hygieneLevel: "good" | "warn" | "risk";
+  };
+  securityFindings: {
+    filesScanned: number;
+    dangerousMatches: number;
+    secretMatches: number;
+    exfiltrationMatches: number;
+    flaggedFiles: string[];
+    potentialDataLeakage: boolean;
+  };
+  llmAssistedAudit?: {
+    alignment: number;
+    security: number;
+    privacy: number;
+    leakageRisk: number;
+    notes: string;
+  };
 }
 
 /** Combined analysis result for a ClawHub skill. */
@@ -256,4 +301,5 @@ export interface ClawHubAnalysis {
     languages: string[];
   };
   timing: ClawHubAnalysisTiming;
+  insights?: ClawHubSourceInsights;
 }

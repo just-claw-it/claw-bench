@@ -229,7 +229,12 @@ export async function extractSkill(
 
 // ── File stats ─────────────────────────────────────────────────────────────
 
-const SCRIPT_EXTENSIONS = new Set([".sh", ".py", ".js", ".ts", ".rb", ".pl"]);
+const SCRIPT_EXTENSIONS = new Set([
+  ".sh", ".py", ".js", ".ts", ".tsx", ".jsx",
+  ".rb", ".pl", ".go", ".java", ".rs", ".php",
+  ".cs", ".cpp", ".c", ".swift", ".kt", ".kts",
+  ".scala", ".lua", ".r", ".ps1", ".mjs", ".cjs",
+]);
 
 export function collectFileStats(dir: string): {
   fileCount: number;
@@ -259,8 +264,30 @@ export function collectFileStats(dir: string): {
         if (SCRIPT_EXTENSIONS.has(ext)) {
           hasScripts = true;
           const langMap: Record<string, string> = {
-            ".sh": "shell", ".py": "python", ".js": "javascript",
-            ".ts": "typescript", ".rb": "ruby", ".pl": "perl",
+            ".sh": "shell",
+            ".ps1": "powershell",
+            ".py": "python",
+            ".js": "javascript",
+            ".jsx": "javascript",
+            ".mjs": "javascript",
+            ".cjs": "javascript",
+            ".ts": "typescript",
+            ".tsx": "typescript",
+            ".rb": "ruby",
+            ".pl": "perl",
+            ".go": "go",
+            ".java": "java",
+            ".rs": "rust",
+            ".php": "php",
+            ".cs": "csharp",
+            ".cpp": "cpp",
+            ".c": "c",
+            ".swift": "swift",
+            ".kt": "kotlin",
+            ".kts": "kotlin",
+            ".scala": "scala",
+            ".lua": "lua",
+            ".r": "r",
           };
           if (langMap[ext]) langSet.add(langMap[ext]);
         }

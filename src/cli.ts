@@ -602,8 +602,16 @@ clawhub
     "Skip syncing the full seed list into SQLite before analyzing (faster after crawl/download; dashboard zip paths may be stale until next seed)"
   )
   .option(
+    "--clean-all-analyses",
+    "Before analyzing: delete prior clawhub_analysis rows for the run scope (full table when the run covers the entire seed list; otherwise only the slugs in this run). Does not touch clawhub_skills or zips."
+  )
+  .option(
     "--clean-analysis",
-    "Before analyzing: delete prior clawhub_analysis rows (full table when the run covers the entire seed list; otherwise only the slugs in this run). Does not touch clawhub_skills or zips."
+    "Deprecated alias for --clean-all-analyses"
+  )
+  .option(
+    "--clean-model-analyses",
+    "With --llm, delete prior clawhub_analysis rows for the current llm_model only (full model scope when run covers entire seed list; otherwise only matching slugs)."
   )
   .action(async (slug: string | undefined, opts) => {
     const { loadSeedList, extractSkill, findExistingZip, seedSkillsToDB } = await import("./clawhub.js");
@@ -614,6 +622,8 @@ clawhub
       hasClawHubLlmAnalysisForModel,
       deleteAllClawHubAnalysis,
       deleteClawHubAnalysisForSlugs,
+      deleteAllClawHubAnalysisForModel,
+      deleteClawHubAnalysisForSlugsAndModel,
     } = await import("./store.js");
 
     const clawhubDir = path.join(process.cwd(), "clawhub");
@@ -635,19 +645,45 @@ clawhub
       process.exit(1);
     }
 
-    if (opts.cleanAnalysis) {
+    const cleanAllAnalyses = !!(opts.cleanAllAnalyses || opts.cleanAnalysis);
+    const cleanModelAnalyses = !!opts.cleanModelAnalyses;
+    if (cleanAllAnalyses && cleanModelAnalyses) {
+      console.error("\nChoose only one: --clean-all-analyses or --clean-model-analyses\n");
+      process.exit(1);
+    }
+    if (cleanModelAnalyses && !opts.llm) {
+      console.error("\n--clean-model-analyses requires --llm (model-specific cleanup).\n");
+      process.exit(1);
+    }
+
+    if (cleanAllAnalyses) {
       const fullSeedRun =
         seeds.length > 0 && toAnalyze.length === seeds.length;
       if (fullSeedRun) {
         await deleteAllClawHubAnalysis();
         console.log(
-          "\nRemoved all rows from clawhub_analysis (--clean-analysis). Fresh rows will be inserted as each skill is analyzed.\n"
+          "\nRemoved all rows from clawhub_analysis (--clean-all-analyses). Fresh rows will be inserted as each skill is analyzed.\n"
         );
       } else {
         const slugs = toAnalyze.map((s) => s.slug);
         await deleteClawHubAnalysisForSlugs(slugs);
         console.log(
-          `\nRemoved prior clawhub_analysis rows for ${slugs.length} slug(s) (--clean-analysis).\n`
+          `\nRemoved prior clawhub_analysis rows for ${slugs.length} slug(s) (--clean-all-analyses).\n`
+        );
+      }
+    } else if (cleanModelAnalyses) {
+      const fullSeedRun = seeds.length > 0 && toAnalyze.length === seeds.length;
+      const llmModelForCleanup = resolvedCatalogLlmModel();
+      if (fullSeedRun) {
+        await deleteAllClawHubAnalysisForModel(llmModelForCleanup);
+        console.log(
+          `\nRemoved prior clawhub_analysis rows for model "${llmModelForCleanup}" across all slugs (--clean-model-analyses).\n`
+        );
+      } else {
+        const slugs = toAnalyze.map((s) => s.slug);
+        await deleteClawHubAnalysisForSlugsAndModel(slugs, llmModelForCleanup);
+        console.log(
+          `\nRemoved prior clawhub_analysis rows for model "${llmModelForCleanup}" across ${slugs.length} slug(s) (--clean-model-analyses).\n`
         );
       }
     }
@@ -719,6 +755,23 @@ clawhub
         `fileStats=${tm.fileStatsMs}ms pipeline=${tm.pipelineMs}ms ` +
         `(total ${tm.extractMs + tm.pipelineMs}ms)`
       );
+      const insights = result.insights;
+      if (insights) {
+        const topLangs = insights.languageBreakdown
+          .slice(0, 3)
+          .map((x) => `${x.language}:${x.files}`)
+          .join(",");
+        const leak = insights.securityFindings.potentialDataLeakage ? "yes" : "no";
+        const cred = insights.credentialHygiene;
+        const credMismatch = `${cred.undeclaredCredentialVars.length}/${cred.declaredButUnusedCredentialVars.length}`;
+        const envCov = Math.round(cred.envExampleCoverage * 100);
+        const hygiene = Math.round(cred.hygieneScore * 100);
+        console.log(
+          `    ${prog} attrs: complexity=${insights.complexity} primary=${insights.primaryLanguage ?? "n/a"} ` +
+          `langs=[${topLangs || "n/a"}] md_mismatch=${insights.undocumentedLanguages.length}/${insights.missingFromCode.length} ` +
+          `hygiene=${hygiene}%(${cred.hygieneLevel}) cred_mismatch=${credMismatch} env_example=${cred.hasEnvExample ? `${envCov}%` : "none"} leakRisk=${leak}`
+        );
+      }
       console.log(
         `    ${prog} static: doc=${pct(s.docQuality)} complete=${pct(s.completeness)} security=${pct(s.security)} ` +
         `code=${s.codeQuality !== null ? pct(s.codeQuality) : "n/a"} maintain=${pct(s.maintainability)} → ${pct(s.staticComposite)}`
@@ -729,6 +782,12 @@ clawhub
           `    ${prog} llm:    clarity=${pct(l.clarity)} useful=${pct(l.usefulness)} safety=${pct(l.safety)} ` +
           `complete=${pct(l.completeness)} → ${pct(l.llmComposite)}`
         );
+        if (l.sourceAudit) {
+          console.log(
+            `    ${prog} llm-audit: align=${pct(l.sourceAudit.alignment)} security=${pct(l.sourceAudit.security)} ` +
+            `privacy=${pct(l.sourceAudit.privacy)} leakageRisk=${pct(l.sourceAudit.leakageRisk)}`
+          );
+        }
       }
       console.log(`    ${prog} overall: ${pct(result.overallComposite)}`);
 

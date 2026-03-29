@@ -15,7 +15,19 @@ services:
       - "3077:3077"
     environment:
       CLAW_BENCH_DB: /data/bench.db
-      # OLLAMA_HOST: http://host.docker.internal:11434   # if benchmarking with Ollama on the host (Mac/Win)
+      # LLM analysis provider settings (used by `clawhub analyze --llm`)
+      # CLAWHUB_LLM_PROVIDER: ollama
+      # OLLAMA_HOST: http://host.docker.internal:11434   # Ollama running on host (Mac/Win)
+      # OLLAMA_ANALYSIS_MODEL: llama3.1:8b
+      #
+      # CLAWHUB_LLM_PROVIDER: openai
+      # OPENAI_API_KEY: your-key
+      # OPENAI_MODEL: gpt-4o-mini
+      # OPENAI_BASE_URL: https://api.openai.com/v1
+      #
+      # CLAWHUB_LLM_PROVIDER: anthropic
+      # ANTHROPIC_API_KEY: your-key
+      # ANTHROPIC_MODEL: claude-sonnet-4-20250514
     volumes:
       - clawbench-data:/data
     healthcheck:
