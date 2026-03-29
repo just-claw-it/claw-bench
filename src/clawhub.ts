@@ -190,8 +190,40 @@ export async function extractSkill(
   if (fs.existsSync(extractDir)) {
     fs.rmSync(extractDir, { recursive: true });
   }
+  fs.mkdirSync(extractDir, { recursive: true });
 
-  zip.extractAllTo(extractDir, true);
+  const rootResolved = path.resolve(extractDir);
+  const entries = zip.getEntries();
+  const sanitize = (entryName: string): string => {
+    // Fix malformed "dir:/file" style paths and normalize separators.
+    let s = entryName.replace(/\\/g, "/").replace(/:\/+/g, "/");
+    // Remove drive prefix if present in archive entry.
+    s = s.replace(/^[A-Za-z]:\//, "");
+    // Normalize and strip leading slash segments.
+    s = path.posix.normalize(s).replace(/^\/+/, "");
+    return s;
+  };
+
+  for (const e of entries) {
+    const rel = sanitize(e.entryName);
+    if (!rel || rel === ".") continue;
+
+    const out = path.resolve(extractDir, rel);
+    // Zip-slip guard: never allow escaping extract root.
+    if (out !== rootResolved && !out.startsWith(rootResolved + path.sep)) {
+      console.warn(`  Skipping suspicious zip entry outside root: ${e.entryName}`);
+      continue;
+    }
+
+    if (e.isDirectory) {
+      fs.mkdirSync(out, { recursive: true });
+      continue;
+    }
+
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    const data = e.getData();
+    fs.writeFileSync(out, data);
+  }
   return extractDir;
 }
 
