@@ -1,4 +1,4 @@
-import express, { type Request, type Response } from "express";
+import express, { type Application, type Request, type Response } from "express";
 import * as path from "path";
 import * as fs from "fs";
 import {
@@ -34,7 +34,8 @@ export interface DashboardOptions {
   port: number;
 }
 
-export function startDashboard(opts: DashboardOptions): void {
+/** Express app with all dashboard API routes (used by `startDashboard` and tests). */
+export function createDashboardApp(): Application {
   const app = express();
   app.use(express.json({ limit: "10mb" }));
 
@@ -325,6 +326,11 @@ export function startDashboard(opts: DashboardOptions): void {
     });
   }
 
+  return app;
+}
+
+export function startDashboard(opts: DashboardOptions): void {
+  const app = createDashboardApp();
   // Bind all interfaces so Docker / published ports work (not only 127.0.0.1).
   const bind =
     process.env.CLAW_BENCH_BIND?.trim() || "0.0.0.0";

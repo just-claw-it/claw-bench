@@ -5,6 +5,11 @@ import ScoreBar from "../components/ScoreBar";
 import AnalysisRadar from "../components/AnalysisRadar";
 import StatCard from "../components/StatCard";
 import { parseLlmModelsJson } from "../components/LlmMultiModelHint";
+import SourceInsightsPanel, {
+  ImportedMetadataCard,
+  PipelineTimingsCard,
+  parseAnalysisInsights,
+} from "../components/SourceInsightsPanel";
 
 export default function SkillAnalysis() {
   const { slug } = useParams<{ slug: string }>();
@@ -265,6 +270,13 @@ export default function SkillAnalysis() {
           />
         </div>
       )}
+
+      {skill.analysis_insights ? (
+        <SourceInsightsPanel
+          insights={parseAnalysisInsights(skill.analysis_insights)}
+          rawJson={skill.analysis_insights}
+        />
+      ) : null}
 
       {/* SKILL.md preview */}
       {skill.skill_md_content && (

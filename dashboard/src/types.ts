@@ -136,6 +136,12 @@ export interface CatalogSkill {
   /** JSON array of LlmModelBreakdown (compact in catalog: no reasoning). */
   llm_models_json: string | null;
   overall_composite: number | null;
+  /** Wall-clock ms from latest analysis row (null if never analyzed). */
+  extract_ms?: number | null;
+  static_analysis_ms?: number | null;
+  llm_ms?: number | null;
+  file_stats_ms?: number | null;
+  pipeline_ms?: number | null;
 }
 
 /** Response from GET /api/catalog (paginated). */
@@ -156,6 +162,20 @@ export interface SkillAnalysisDetail extends CatalogSkill {
   scraped_at: string;
   skill_md_content: string | null;
   files: string[];
+  /** JSON string of ClawHubSourceInsights; parse on the client. */
+  analysis_insights?: string | null;
+  /** Convex / `import-metadata` row when `skill_name` matches this slug. */
+  import_meta_author?: string | null;
+  import_meta_verified_author?: number | null;
+  import_meta_tags?: string | null;
+  import_meta_star_rating?: number | null;
+  import_meta_star_count?: number | null;
+  import_meta_latest_version?: string | null;
+  import_meta_total_versions?: number | null;
+  import_meta_dependency_count?: number | null;
+  import_meta_first_published_at?: string | null;
+  import_meta_last_updated_at?: string | null;
+  import_meta_recorded_at?: string | null;
 }
 
 export interface CatalogStats {

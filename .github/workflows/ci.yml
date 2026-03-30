@@ -32,7 +32,7 @@ jobs:
         run: npm ci --prefix dashboard && npm run dashboard:build
 
       - name: Run test suite
-        run: npm run test:run
+        run: npm run test:run && npm run dashboard:test
 
       - name: Smoke-test against echo-skill
         run: |

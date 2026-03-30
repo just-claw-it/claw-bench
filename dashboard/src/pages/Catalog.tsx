@@ -316,6 +316,11 @@ function SkillCard({ skill }: { skill: CatalogSkill }) {
       {!skill.analyzed && (
         <div className="text-xs text-slate-400 italic">Not yet analyzed</div>
       )}
+      {skill.analyzed && skill.pipeline_ms != null && (
+        <p className="text-[10px] text-slate-400 mt-2 tabular-nums">
+          Pipeline {Math.round(skill.pipeline_ms)} ms
+        </p>
+      )}
     </a>
   );
 }
@@ -340,6 +345,9 @@ function SkillTable({
             <th className="px-4 py-2 text-left text-xs font-medium text-slate-500 uppercase">Static</th>
             <th className="px-4 py-2 text-left text-xs font-medium text-slate-500 uppercase">LLM</th>
             <th className="px-4 py-2 text-left text-xs font-medium text-slate-500 uppercase">Overall</th>
+            <th className="px-4 py-2 text-left text-xs font-medium text-slate-500 uppercase" title="Wall time from latest analyze run">
+              Pipeline
+            </th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
@@ -394,6 +402,9 @@ function SkillTable({
                 ) : (
                   <span className="text-slate-400">--</span>
                 )}
+              </td>
+              <td className="px-4 py-2 font-mono text-xs text-slate-500 tabular-nums">
+                {sk.pipeline_ms != null ? `${Math.round(sk.pipeline_ms)} ms` : "—"}
               </td>
             </tr>
           ))}

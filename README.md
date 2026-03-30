@@ -152,7 +152,7 @@ The same numbers are persisted on **each insert** into SQLite table **`clawhub_a
 | `file_stats_ms` | `collectFileStats` |
 | `pipeline_ms` | Entire `analyzeSkill()` run |
 
-Database file: **`CLAW_BENCH_DB`** (default **`~/.claw-bench/bench.db`**). Existing databases get these columns via migration on next open. The **ClawHub Catalog** dashboard does not show timing yet; use the CLI output or query SQLite (e.g. `SELECT slug, analyzed_at, extract_ms, pipeline_ms FROM clawhub_analysis ORDER BY id DESC LIMIT 20`).
+Database file: **`CLAW_BENCH_DB`** (default **`~/.claw-bench/bench.db`**). Existing databases get these columns via migration on next open. The **ClawHub Catalog** dashboard shows pipeline timings, **source insights** (`analysis_insights`), and **imported metadata** (when `skill_name` matches the slug) on the skill detail page; the catalog table includes a **Pipeline** column. For ad hoc SQL: `SELECT slug, analyzed_at, extract_ms, pipeline_ms FROM clawhub_analysis ORDER BY id DESC LIMIT 20`.
 
 **Re-run / backfill timing and scores** — Each `clawhub analyze` **inserts a new row**; nothing is updated in place unless you pass **`--clean-all-analyses`** or **`--clean-model-analyses`**. The catalog and dashboard use the **latest row per skill** (by `analyzed_at`), so older rows (including those with `NULL` timing columns from before timing existed) are **ignored** for display once a newer analysis exists.
 
@@ -461,7 +461,7 @@ npm run build
 npm test
 ```
 
-`dist/` is not committed; run `npm run build` after pulling. Dashboard: `npm run dashboard:install` and `npm run dashboard:build`. Tests: `npm test` (root) or `npm run test:run` after a build. Set **`CLAWHUB_SKIP_NETWORK_SMOKE=1`** to skip the optional Convex smoke test (`data sync-clawhub-metadata` dry-run) when offline.
+`dist/` is not committed; run `npm run build` after pulling. Dashboard: `npm run dashboard:install` and `npm run dashboard:build`. Tests: **`npm test`** runs the Node suite plus **Vitest** for the dashboard UI (requires `npm run dashboard:install` first). Use **`npm run test:run`** for Node-only tests after a build, or **`npm run dashboard:test`** for dashboard tests only. Set **`CLAWHUB_SKIP_NETWORK_SMOKE=1`** to skip the optional Convex smoke test (`data sync-clawhub-metadata` dry-run) when offline.
 
 ## License
 

@@ -903,7 +903,9 @@ function clawhubCatalogSelectSql(): string {
        llm_json.llm_models_json,
        (${overall}) AS overall_composite,
        (SELECT MAX(ca.analyzed_at) FROM clawhub_analysis ca WHERE ca.slug = s.slug) AS analyzed_at,
-       CASE WHEN latest.id IS NOT NULL THEN 1 ELSE 0 END AS analyzed`;
+       CASE WHEN latest.id IS NOT NULL THEN 1 ELSE 0 END AS analyzed,
+       latest.extract_ms, latest.static_analysis_ms, latest.llm_ms, latest.file_stats_ms,
+       latest.pipeline_ms`;
 }
 
 export interface ClawHubCatalogPageOpts {
@@ -1020,7 +1022,21 @@ export async function getClawHubSkillDetail(slug: string): Promise<Record<string
        latest.llm_reasoning AS llm_reasoning,
        (${overall}) AS overall_composite,
        (SELECT MAX(ca.analyzed_at) FROM clawhub_analysis ca WHERE ca.slug = s.slug) AS analyzed_at,
-       CASE WHEN latest.id IS NOT NULL THEN 1 ELSE 0 END AS analyzed
+       CASE WHEN latest.id IS NOT NULL THEN 1 ELSE 0 END AS analyzed,
+       latest.extract_ms, latest.static_analysis_ms, latest.llm_ms, latest.file_stats_ms,
+       latest.pipeline_ms,
+       latest.analysis_insights,
+       meta.author AS import_meta_author,
+       meta.verified_author AS import_meta_verified_author,
+       meta.tags AS import_meta_tags,
+       meta.star_rating AS import_meta_star_rating,
+       meta.star_count AS import_meta_star_count,
+       meta.latest_version AS import_meta_latest_version,
+       meta.total_versions AS import_meta_total_versions,
+       meta.dependency_count AS import_meta_dependency_count,
+       meta.first_published_at AS import_meta_first_published_at,
+       meta.last_updated_at AS import_meta_last_updated_at,
+       meta.metadata_recorded_at AS import_meta_recorded_at
      FROM clawhub_skills s
      LEFT JOIN (
        ${CLAWHUB_LATEST_ANALYSIS_SUB}
@@ -1029,6 +1045,7 @@ export async function getClawHubSkillDetail(slug: string): Promise<Record<string
        ${llmAgg}
      ) llm ON llm.slug = s.slug
      LEFT JOIN (${LLM_DETAIL_JSON_SUB}) detail ON detail.slug = s.slug
+     LEFT JOIN skill_metadata meta ON meta.skill_name = s.slug
      WHERE s.slug = ?`,
     [slug, slug]
   );
