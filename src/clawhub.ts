@@ -8,7 +8,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { ClawHubSkillEntry } from "./types.js";
-import { upsertClawHubSkill } from "./store.js";
+import { dbPath, upsertClawHubSkill, upsertClawHubSkillsBatch } from "./store.js";
 
 const DOWNLOAD_BASE = "https://wry-manatee-359.convex.site/api/v1/download";
 const MAX_RETRIES = 3;
@@ -416,24 +416,23 @@ export async function seedSkillsToDB(
 ): Promise<{ seeded: number }> {
   const skills = loadSeedList(projectRoot);
   const total = skills.length;
-  let seeded = 0;
   const quiet = options?.quiet ?? false;
   const isTTY = process.stdout.isTTY;
   const showProgress = !quiet && total > 0;
+  const clawhubDir = path.join(projectRoot, "clawhub");
 
+  const rows: Array<{ entry: ClawHubSkillEntry; extra: { zipPath?: string } }> = [];
+  let resolved = 0;
   for (const skill of skills) {
-    const clawhubDir = path.join(projectRoot, "clawhub");
     const zipPath = findExistingZip(skill.slug, clawhubDir);
-
-    await upsertClawHubSkill(skill, { zipPath: zipPath ?? undefined });
-    seeded++;
-
+    rows.push({ entry: skill, extra: { zipPath: zipPath ?? undefined } });
+    resolved++;
     if (!showProgress) continue;
-    const pct = ((seeded / total) * 100).toFixed(1);
+    const pct = ((resolved / total) * 100).toFixed(1);
     if (isTTY) {
-      process.stdout.write(`\r  Seeding ${seeded}/${total} (${pct}%)…`);
-    } else if (seeded % 500 === 0 || seeded === total) {
-      console.log(`  Seeding ${seeded}/${total} (${pct}%)…`);
+      process.stdout.write(`\r  Preparing ${resolved}/${total} (${pct}%)…`);
+    } else if (resolved % 500 === 0 || resolved === total) {
+      console.log(`  Preparing ${resolved}/${total} (${pct}%)…`);
     }
   }
 
@@ -441,5 +440,48 @@ export async function seedSkillsToDB(
     process.stdout.write("\n");
   }
 
-  return { seeded };
+  if (!quiet && total > 0) {
+    console.log(
+      `  Applying ${total} rows to SQLite (${dbPath()})…`
+    );
+    console.log(
+      "  If nothing follows: wait for the DB lock (another claw-bench), or delete bench.db.lock beside the DB file."
+    );
+  }
+
+  await upsertClawHubSkillsBatch(rows, {
+    onBatchBegin:
+      !quiet && total > 0
+        ? () => {
+            console.log("  SQLite: loading engine and opening database…");
+          }
+        : undefined,
+    onProgress: showProgress
+      ? (current, n) => {
+          const pct = ((current / n) * 100).toFixed(1);
+          if (isTTY) {
+            const step = n > 5000 ? 50 : 1;
+            if (current !== 1 && current !== n && current % step !== 0) return;
+            process.stdout.write(`\r  Writing ${current}/${n} (${pct}%) to SQLite…`);
+          } else if (current % 500 === 0 || current === 1 || current === n) {
+            console.log(`  Writing ${current}/${n} (${pct}%) to SQLite…`);
+          }
+        }
+      : undefined,
+    beforeFlush:
+      !quiet && total > 0
+        ? () => {
+            if (isTTY) process.stdout.write("\n");
+            console.log(
+              "  Saving database to disk (sql.js full export — can take minutes on large catalogs)…"
+            );
+          }
+        : undefined,
+  });
+
+  if (showProgress && isTTY) {
+    process.stdout.write("\n");
+  }
+
+  return { seeded: total };
 }

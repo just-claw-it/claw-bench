@@ -32,6 +32,34 @@ function defaultClawhubSkillsMetadataPath(): string {
   return path.join(process.cwd(), "clawhub", "skills-metadata.json");
 }
 
+/** Progress UI for `importSkillMetadata` (TTY + non-TTY; aligned with `seedSkillsToDB`). */
+function importMetadataProgressHandlers(quiet: boolean): {
+  onProgress?: (current: number, total: number, skillName: string) => void;
+  finishLine: () => void;
+} {
+  if (quiet) {
+    return { finishLine: () => {} };
+  }
+  const isTTY = process.stdout.isTTY;
+  return {
+    onProgress(current, total, skillName) {
+      const pct = ((current / total) * 100).toFixed(1);
+      const display =
+        skillName.length > 52 ? `${skillName.slice(0, 49)}…` : skillName;
+      if (isTTY) {
+        process.stdout.write(
+          `\r  Importing ${current}/${total} (${pct}%)  ${display}`
+        );
+      } else if (current % 500 === 0 || current === 1 || current === total) {
+        console.log(`  Importing ${current}/${total} (${pct}%)  ${skillName}`);
+      }
+    },
+    finishLine() {
+      if (isTTY) process.stdout.write("\n");
+    },
+  };
+}
+
 const program = new Command();
 
 program
@@ -348,7 +376,8 @@ data
   .description(
     "Import full skill metadata from JSON (SkillMetadata[]). Default file: clawhub/skills-metadata.json"
   )
-  .action(async (file?: string) => {
+  .option("-q, --quiet", "Suppress import progress lines")
+  .action(async (file?: string, opts?: { quiet?: boolean }) => {
     const resolved = path.resolve(file ?? defaultClawhubSkillsMetadataPath());
     if (!fs.existsSync(resolved)) {
       console.error(`File not found: ${resolved}\nPass a path or run sync-clawhub-metadata --json-only first.\n`);
@@ -358,7 +387,14 @@ data
     try { records = JSON.parse(fs.readFileSync(resolved, "utf-8")); }
     catch (e) { console.error(`Invalid JSON: ${e}`); process.exit(1); }
     if (!Array.isArray(records)) { console.error("Expected a JSON array of SkillMetadata objects."); process.exit(1); }
-    const result = await importSkillMetadata(records as SkillMetadata[]);
+    if (!opts?.quiet) {
+      console.log(`\nImporting ${records.length} skill(s) into SQLite…`);
+    }
+    const ph = importMetadataProgressHandlers(!!opts?.quiet);
+    const result = await importSkillMetadata(records as SkillMetadata[], {
+      onProgress: ph.onProgress,
+    });
+    ph.finishLine();
     console.log(`\nImported:`);
     console.log(`  Skills upserted:       ${result.upserted}`);
     console.log(`  Install snapshots:     ${result.installSnapshots}`);
@@ -393,7 +429,7 @@ data
     "--json-only",
     "Only write JSON (default clawhub/skills-metadata.json); skip SQLite, then run: data import-metadata"
   )
-  .option("-q, --quiet", "Suppress per-skill progress lines")
+  .option("-q, --quiet", "Suppress fetch and SQLite import progress lines")
   .action(
     async (
       slugs: string[],
@@ -516,7 +552,11 @@ data
         return;
       }
 
-      const result = await importSkillMetadata(records as SkillMetadata[]);
+      const ph = importMetadataProgressHandlers(!!opts.quiet);
+      const result = await importSkillMetadata(records as SkillMetadata[], {
+        onProgress: ph.onProgress,
+      });
+      ph.finishLine();
       console.log(`\nImported:`);
       console.log(`  Skills upserted:       ${result.upserted}`);
       console.log(`  Install snapshots:     ${result.installSnapshots}`);

@@ -383,6 +383,11 @@ export function storeRun(
 
 // ── Skill metadata import ──────────────────────────────────────────────────
 
+export interface ImportSkillMetadataOptions {
+  /** Called after each skill is written (1-based index). */
+  onProgress?: (current: number, total: number, skillName: string) => void;
+}
+
 /**
  * Upsert a batch of SkillMetadata records.
  *
@@ -395,7 +400,8 @@ export function storeRun(
  * skill_dependencies is fully replaced per skill on each import.
  */
 export function importSkillMetadata(
-  skills: SkillMetadata[]
+  skills: SkillMetadata[],
+  options?: ImportSkillMetadataOptions
 ): Promise<{ upserted: number; installSnapshots: number; versions: number; deps: number }> {
   return serialize(async () => {
   const SQL = await getSql();
@@ -408,7 +414,11 @@ export function importSkillMetadata(
   let versions = 0;
   let deps = 0;
 
-  for (const skill of skills) {
+  const total = skills.length;
+  const onProgress = options?.onProgress;
+
+  for (let i = 0; i < skills.length; i++) {
+    const skill = skills[i];
     // ── skill_metadata (upsert) ──────────────────────────────────────────
     db.run(
       `INSERT INTO skill_metadata (
@@ -497,11 +507,18 @@ export function importSkillMetadata(
       );
       deps++;
     }
+
+    onProgress?.(upserted, total, skill.skillName);
   }
 
   saveDb(db, fp);
   db.close();
-  return { upserted, installSnapshots, versions, deps };
+  return {
+    upserted,
+    installSnapshots,
+    versions,
+    deps,
+  };
   });
 }
 
@@ -650,23 +667,17 @@ export async function metadataCount(): Promise<number> {
 
 // ── ClawHub skill catalog CRUD ────────────────────────────────────────────
 
-export function upsertClawHubSkill(
-  entry: ClawHubSkillEntry,
-  extra: {
-    zipPath?: string;
-    extractedPath?: string;
-    hasScripts?: boolean;
-    fileCount?: number;
-    totalSizeBytes?: number;
-    skillMdLength?: number;
-  } = {}
-): Promise<void> {
-  return serialize(async () => {
-    const SQL = await getSql();
-    const fp = dbPath();
-    const db = loadDb(SQL, fp);
-    db.run(
-      `INSERT INTO clawhub_skills (
+/** Extra columns for `clawhub_skills` upsert (zip path, analysis-derived stats). */
+export type ClawHubSkillUpsertExtra = {
+  zipPath?: string;
+  extractedPath?: string;
+  hasScripts?: boolean;
+  fileCount?: number;
+  totalSizeBytes?: number;
+  skillMdLength?: number;
+};
+
+const UPSERT_CLAWHUB_SKILL_SQL = `INSERT INTO clawhub_skills (
         slug, name, description, author, version, downloads, stars,
         version_count, scraped_at, zip_path, extracted_path,
         has_scripts, file_count, total_size_bytes, skill_md_length
@@ -685,25 +696,86 @@ export function upsertClawHubSkill(
         has_scripts      = CASE WHEN excluded.has_scripts > 0 THEN excluded.has_scripts ELSE clawhub_skills.has_scripts END,
         file_count       = CASE WHEN excluded.file_count > 0 THEN excluded.file_count ELSE clawhub_skills.file_count END,
         total_size_bytes = CASE WHEN excluded.total_size_bytes > 0 THEN excluded.total_size_bytes ELSE clawhub_skills.total_size_bytes END,
-        skill_md_length  = CASE WHEN excluded.skill_md_length > 0 THEN excluded.skill_md_length ELSE clawhub_skills.skill_md_length END`,
-      [
-        entry.slug,
-        entry.name,
-        entry.summary,
-        entry.author,
-        entry.version,
-        entry.downloads,
-        entry.stars,
-        entry.versionCount,
-        new Date().toISOString(),
-        extra.zipPath ?? null,
-        extra.extractedPath ?? null,
-        extra.hasScripts ? 1 : 0,
-        extra.fileCount ?? 0,
-        extra.totalSizeBytes ?? 0,
-        extra.skillMdLength ?? 0,
-      ]
-    );
+        skill_md_length  = CASE WHEN excluded.skill_md_length > 0 THEN excluded.skill_md_length ELSE clawhub_skills.skill_md_length END`;
+
+function upsertClawHubSkillOnDb(
+  db: Database,
+  entry: ClawHubSkillEntry,
+  extra: ClawHubSkillUpsertExtra,
+  scrapedAt: string
+): void {
+  db.run(UPSERT_CLAWHUB_SKILL_SQL, [
+    entry.slug,
+    entry.name,
+    entry.summary,
+    entry.author,
+    entry.version,
+    entry.downloads,
+    entry.stars,
+    entry.versionCount,
+    scrapedAt,
+    extra.zipPath ?? null,
+    extra.extractedPath ?? null,
+    extra.hasScripts ? 1 : 0,
+    extra.fileCount ?? 0,
+    extra.totalSizeBytes ?? 0,
+    extra.skillMdLength ?? 0,
+  ]);
+}
+
+export function upsertClawHubSkill(
+  entry: ClawHubSkillEntry,
+  extra: ClawHubSkillUpsertExtra = {}
+): Promise<void> {
+  return serialize(async () => {
+    const SQL = await getSql();
+    const fp = dbPath();
+    const db = loadDb(SQL, fp);
+    upsertClawHubSkillOnDb(db, entry, extra, new Date().toISOString());
+    saveDb(db, fp);
+    db.close();
+  });
+}
+
+export interface UpsertClawHubSkillsBatchOptions {
+  /** Invoked once the DB lock is acquired, before loading sql.js / opening the file. */
+  onBatchBegin?: () => void;
+  /** Called after each row is applied in-memory (1-based `current`). */
+  onProgress?: (current: number, total: number) => void;
+  /**
+   * Called after all `INSERT`s, immediately before writing the DB file to disk.
+   * The following step (`db.export` + `writeFileSync`) can take a long time and blocks the event loop.
+   */
+  beforeFlush?: () => void;
+}
+
+/**
+ * Batch upsert into `clawhub_skills` in a single DB load/save (same pattern as `importSkillMetadata`).
+ * Use for full-catalog seeding; callers should prefer this over many `upsertClawHubSkill` calls.
+ */
+export function upsertClawHubSkillsBatch(
+  rows: Array<{ entry: ClawHubSkillEntry; extra?: ClawHubSkillUpsertExtra }>,
+  options?: UpsertClawHubSkillsBatchOptions
+): Promise<void> {
+  if (rows.length === 0) return Promise.resolve();
+  return serialize(async () => {
+    options?.onBatchBegin?.();
+    const SQL = await getSql();
+    const fp = dbPath();
+    const db = loadDb(SQL, fp);
+    const scrapedAt = new Date().toISOString();
+    const total = rows.length;
+    let current = 0;
+    for (const { entry, extra = {} } of rows) {
+      upsertClawHubSkillOnDb(db, entry, extra, scrapedAt);
+      current++;
+      options?.onProgress?.(current, total);
+      // Let the event loop run so TTY progress can flush during long in-memory upserts.
+      if (current % 500 === 0 && current < total) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    }
+    options?.beforeFlush?.();
     saveDb(db, fp);
     db.close();
   });
