@@ -20,7 +20,9 @@
 
 ## Installation
 
-The package is **not on the npm registry yet** — clone this repository and run `npm install && npm run build`, or use `npm link` from the repo root (see [Development](#development)). When it is published, you will be able to use:
+The package is **not on the npm registry yet** — clone this repository, then **`npm install`**, **`npm run build`**, and run the CLI with **`npx claw-bench …`** (see [Run the CLI from a clone](#run-the-cli-from-a-clone)). Optional: **`npm link`** in the repo root registers a global `claw-bench` command.
+
+When the package is published, you will be able to use:
 
 ```bash
 npm install -g claw-bench
@@ -40,61 +42,99 @@ npm install claw-bench
   ollama pull nomic-embed-text
   ```
 
-### Running from this repository (`command not found: claw-bench`)
+### Run the CLI from a clone
 
-The `claw-bench` command is only on your shell `PATH` if you install the package globally (`npm install -g claw-bench`) or link it (`npm link` inside this repo). When you clone the repo and run `claw-bench` directly, your shell may report **command not found**.
-
-From the project root, build once, then use one of these:
+From the project root, install and compile once:
 
 ```bash
 npm install
 npm run build
 ```
 
-- **`npx claw-bench <args>`** — runs the local CLI (e.g. `npx claw-bench clawhub list`, `npx claw-bench dashboard --port 3078`).
-- **`npm run clawhub -- <args>`** — same as `node dist/cli.js clawhub <args>` (e.g. `npm run clawhub -- list`, `npm run clawhub -- download --all`).
-- **`npm run dashboard -- --port 3078`** — starts the dashboard on a free port if `3077` is busy.
+**What you are actually running:** the compiled file **`dist/cli.js`**. Everything below is just a different way to invoke **`node dist/cli.js …`** with the same arguments.
 
-Optional: `npm link` in the repo adds `claw-bench` to your PATH for this machine.
+| You type | What runs |
+|----------|-----------|
+| **`npx claw-bench <args>`** | **`node dist/cli.js <args>`** (recommended from a clone) |
+| **`node dist/cli.js <args>`** | Direct — same as the row above; Docker uses this form |
+| **`npm run clawhub -- <args>`** | **`node dist/cli.js clawhub <args>`** (e.g. `npm run clawhub -- list`, `npm run clawhub -- download --all`) |
+| **`npm run dashboard -- <args>`** | **`node dist/cli.js dashboard <args>`** (note extra `--` before flags: `npm run dashboard -- --port 3078`) |
+
+Commands that are **not** under `clawhub` still go through the same binary: **`npx claw-bench data stats`**, **`npx claw-bench run ./examples/echo-skill`**, **`npx claw-bench report`**, etc.
+
+**`clawhub download`** — fetches skill zips into **`clawhub/zip/`** (and updates the DB):
+
+| Form | What it does |
+|------|----------------|
+| **`clawhub download`** with **no slug**, or **`clawhub download --all`** | Every skill in **`clawhub/skills-seed.json`**. Already-present zips are skipped. |
+| **`clawhub download <slug>`** | Only that skill (e.g. `author/skill-name`). |
+
+**`clawhub analyze`** — static analysis + optional **`--llm`** (needs a zip per skill):
+
+| Form | What it does |
+|------|----------------|
+| **`clawhub analyze`** with **no slug**, or **`clawhub analyze --all`** | Every row in the seed list; **skills without a zip are skipped** (`no zip found`). |
+| **`clawhub analyze <slug>`** | Only that slug (must be in the seed list and have a zip). |
+
+**`--all`** (or omitting the slug) means “full seed list” for both **`download`** and **`analyze`**.
+
+**Optional:** **`npm link`** in the repo registers **`claw-bench`** on your PATH so you can type **`claw-bench …`** instead of **`npx claw-bench …`**.
 
 ### Docker
 
-Build and run the dashboard + API anywhere:
+The image already contains a built **`dist/`**. **Inside the container**, run **`node dist/cli.js …`** — it is the **same CLI** as **`npx claw-bench …`** on your laptop, with the **same** arguments in the **same** order.
 
-```bash
-docker compose up --build
-# http://localhost:3077
-```
+| On your machine (repo root, after `npm run build`) | Inside the container (app dir is usually `/app`) |
+|----------------------------------------------------|--------------------------------------------------|
+| `npx claw-bench clawhub list` | `node dist/cli.js clawhub list` |
+| `npx claw-bench dashboard` | `node dist/cli.js dashboard` |
+| `npx claw-bench data stats` | `node dist/cli.js data stats` |
 
-- **SQLite** is stored on the **`clawbench-data`** volume at **`CLAW_BENCH_DB=/data/bench.db`** (survives container restarts).
-- The HTTP server binds **`0.0.0.0`** by default so published ports work; set **`CLAW_BENCH_BIND`** (e.g. `127.0.0.1`) to override.
-- **`NODE_ENV=production`** (set in the image) hides local example runs (e.g. `examples/echo-skill`) from dashboard API responses. Set **`CLAW_BENCH_SHOW_TEST_RUNS=1`** in the container environment if you want them listed.
-- The image ships an **empty** `clawhub/skills-seed.json` (`[]`). Populate the catalog by **exec**’ing into the container, or **bind-mount** seed and optionally `clawhub/zip/` for downloads.
-- For `clawhub analyze --llm` in container, set provider env vars in `docker-compose.yml` (`CLAWHUB_LLM_PROVIDER` + Ollama/OpenAI/Anthropic vars). Examples are commented in the compose file.
+With Compose, open a shell in the **`claw-bench`** service and run **`node dist/cli.js …`**, or use one-shot exec:
 
 ```bash
 docker compose exec claw-bench node dist/cli.js clawhub crawl --dry-run
 docker compose exec claw-bench node dist/cli.js clawhub crawl
 ```
 
-Mount examples in `docker-compose.yml`:
+Start the dashboard + API:
+
+```bash
+docker compose up --build
+# http://localhost:3077
+```
+
+- **SQLite** — **`clawbench-data`** volume at **`CLAW_BENCH_DB=/data/bench.db`** (persists across restarts).
+- **Bind** — **`0.0.0.0`** by default; set **`CLAW_BENCH_BIND`** (e.g. `127.0.0.1`) to change.
+- **Example runs** — **`NODE_ENV=production`** hides paths like **`examples/echo-skill`** from the dashboard API unless you set **`CLAW_BENCH_SHOW_TEST_RUNS=1`**.
+- **Empty seed** — the image ships **`clawhub/skills-seed.json`** as **`[]`**. Populate by **bind-mounting** a real seed file or running **`crawl`** / **`download`** inside the container.
+- **`clawhub analyze --llm`** — set provider env vars in **`docker-compose.yml`** (see commented examples).
+
+Bind-mount example (optional):
 
 ```yaml
 volumes:
   - ./clawhub/skills-seed.json:/app/clawhub/skills-seed.json:ro
-  # optional: persist downloaded zips or metadata JSON from `data sync-clawhub-metadata`
   - ./clawhub/zip:/app/clawhub/zip
   # - ./clawhub/skills-metadata.json:/app/clawhub/skills-metadata.json
 ```
 
-Plain **Docker** (no Compose): `docker build -t claw-bench .` then  
-`docker run -p 3077:3077 -v clawbench-data:/data claw-bench`.
+Plain **Docker** (no Compose): **`docker build -t claw-bench .`** then **`docker run -p 3077:3077 -v clawbench-data:/data claw-bench`**.
 
 ### ClawHub: crawl, download, analyze
 
+**Typical order (first time or full refresh):** **`crawl`** → write **`skills-seed.json`** and SQLite → **`download`** (zips) → **`analyze`** (optional **`--llm`**). You can **`download`** / **`analyze`** again later without re-crawling if the seed file is already good.
+
+All examples use **`npx claw-bench`** from the repo root after **`npm run build`** — same as **`node dist/cli.js`** ([Run the CLI from a clone](#run-the-cli-from-a-clone), [Docker](#docker)).
+
 Registry data comes from the same Convex API as [clawhub.ai/skills](https://clawhub.ai/skills) (`skills:listPublicPageV4`), not HTML scraping.
 
-**Crawl** (after `npm run build`):
+**`clawhub crawl`** — refreshes the local catalog from the network:
+
+- **`clawhub crawl`** (default) — pages through the public registry, writes **`clawhub/skills-seed.json`**, then **upserts every skill into SQLite** (`clawhub_skills`). This is how you get or update the master skill list before **`download`** / **`analyze`**.
+- **`--sort <field>`** — registry ordering while fetching (default **`downloads`**). Allowed: **`newest`**, **`updated`**, **`downloads`**, **`installs`**, **`stars`**, **`name`**.
+- **`--dry-run`** — **without `--seed-only`**: fetches and prints totals but **does not** write **`skills-seed.json`** or sync the DB. **With `--seed-only`**: prints how many skills are in the seed file and **does not** write the DB.
+- **`--seed-only`** — **no** Convex fetch. Reads **`clawhub/skills-seed.json`** and upserts into SQLite only. Use when the seed file already exists and you only want to sync the DB (fails if the file is missing or empty).
 
 ```bash
 npx claw-bench clawhub crawl
@@ -114,9 +154,9 @@ npx claw-bench clawhub crawl --sort stars
 
 Unless **`--dry-run`**, sync writes **`clawhub/skills-metadata.json`** immediately as `[]`, then **rewrites the full array after each successful skill** until done. Large catalogs take a long time; use **`--limit <n>`** to smoke-test. **`--concurrency`** (default `2`) and **`--delay-ms`** reduce load on Convex; **`--json-out <path>`** writes an **additional** copy alongside the default file. **`--quiet`** hides per-slug lines. Example **`SkillMetadata[]`** shape: **`examples/skill-metadata-import.example.json`**.
 
-**Download** — saves zips under **`clawhub/zip/`** (legacy zips in `clawhub/` are moved there on the next `download --all`). Existing non-empty zips are skipped; failed slugs succeed on re-run. Rate limits (HTTP 429) use `Retry-After` and backoff; tune parallelism with **`CLAWHUB_DOWNLOAD_CONCURRENCY`** (default `1`).
+**Download** (see [Run the CLI from a clone](#run-the-cli-from-a-clone) for **no slug** vs **`--all`** vs **`<slug>`**) — saves zips under **`clawhub/zip/`** (legacy zips in `clawhub/` are moved there on the next full download). Existing non-empty zips are skipped; failed slugs succeed on re-run. Rate limits (HTTP 429) use `Retry-After` and backoff; tune parallelism with **`CLAWHUB_DOWNLOAD_CONCURRENCY`** (default `1`).
 
-**Analyze** — extracts to `clawhub-skills/<slug>/`, static + optional **`--llm`**. **`--cleanup`** drops zip + extract after each skill. Unless **`--no-seed`**, analyze **re-syncs the full seed into SQLite** first (like crawl/download) so `zip_path` matches disk—skip that when you already ran those steps and want to avoid a long upsert pass.
+**Analyze** (same section: **no slug** / **`--all`** / **`<slug>`**) — extracts to **`clawhub-skills/<slug>/`**, runs static checks + optional **`--llm`**. **`--cleanup`** deletes zip + extracted folder after each successful skill. Unless **`--no-seed`**, analyze **re-syncs the full seed list into SQLite** first (same upsert as crawl/download) so paths in the DB match disk—use **`--no-seed`** when you already crawled or downloaded recently and want to skip that pass.
 
 By default each run **appends** new rows to **`clawhub_analysis`**; it does **not** remove older results. Use **`--clean-all-analyses`** to wipe prior rows first: **full table** `DELETE` when the run covers the **entire** seed list (e.g. `analyze` with no slug, or any case where every seed is in scope); otherwise only **`DELETE` for the slugs** in that run (e.g. `analyze my-skill --clean-all-analyses`). Catalog rows in **`clawhub_skills`** and zips are unchanged. Use **`--clean-model-analyses`** (with `--llm`) to remove rows for only the current `llm_model`.
 
@@ -229,21 +269,28 @@ Override the Convex deployment URL if ClawHub moves (rare):
 
 ## Quick start
 
+| Situation | Command prefix |
+|-----------|----------------|
+| **Clone of this repo** (after `npm run build`) | **`npx claw-bench …`** |
+| **`npm link`** or **global `npm install -g`** | **`claw-bench …`** |
+| **Docker** | **`node dist/cli.js …`** inside the container ([Docker](#docker)) |
+
 ```bash
 # Benchmark a local skill
-claw-bench run ./my-skill
+npx claw-bench run ./examples/echo-skill
+# or: claw-bench run ./my-skill   if linked / global
 
-# Benchmark a skill by name (looks in ./skills, ~/.clawhub/skills, etc.)
-claw-bench run my-skill
+# Benchmark by name (searches ./skills, ~/.clawhub/skills, etc.)
+npx claw-bench run my-skill
 
-# Compare two skills side-by-side
-claw-bench compare ./skill-a ./skill-b
+# Compare two skills
+npx claw-bench compare ./skill-a ./skill-b
 
-# View the last report as markdown
-claw-bench report --format md
+# Last report as markdown
+npx claw-bench report --format md
 
-# Push results to the ClawHub leaderboard
-claw-bench push --api-key <key>
+# Push to the ClawHub leaderboard
+npx claw-bench push --api-key <key>
 ```
 
 ## Scoring dimensions
@@ -258,6 +305,8 @@ claw-bench push --api-key <key>
 If a skill ships with `bench.json`, it receives an **authored** score (all four dimensions). Otherwise, it gets an **automated** score (consistency + robustness + latency).
 
 ## CLI commands
+
+The first word is always **`claw-bench`** (or **`npx claw-bench`** from a clone — see [Run the CLI from a clone](#run-the-cli-from-a-clone)). Subcommands split into **`clawhub …`** (catalog), **`data …`** (local DB analytics), and top-level commands (**`run`**, **`compare`**, **`report`**, **`dashboard`**, **`push`**).
 
 ### `claw-bench run <skill>`
 
@@ -300,7 +349,7 @@ Push a report to the ClawHub leaderboard.
 
 ### `claw-bench data <subcommand>`
 
-Query the local benchmark database for analytics.
+Query the local benchmark database. **`data`** is not nested under **`clawhub`**: the pattern is **`claw-bench data <subcommand>`** (e.g. **`npx claw-bench data stats`**, **`npx claw-bench data sync-clawhub-metadata --from-seed`**).
 
 | Subcommand | Description |
 |------------|-------------|
@@ -416,17 +465,23 @@ claw-bench includes an interactive web dashboard for browsing, comparing, and an
 
 ### Quick start
 
+From the repo root: **`npm run build`** (CLI), then install and build the **UI** bundle:
+
 ```bash
-# Install dashboard dependencies
-npm run dashboard:install
-
-# Build the dashboard
-npm run dashboard:build
-
-# Launch (serves on http://localhost:3077)
-npx claw-bench dashboard
-# or: npm run dashboard
+npm run dashboard:install   # once: dashboard deps
+npm run dashboard:build       # compile Vite app into dashboard/dist/
 ```
+
+Serve API + static UI (default **http://localhost:3077**):
+
+```bash
+npx claw-bench dashboard
+# same: npm run dashboard
+# other port: npx claw-bench dashboard --port 3078
+#            npm run dashboard -- --port 3078
+```
+
+In Docker, use **`node dist/cli.js dashboard`** ([Docker](#docker)).
 
 ### Dashboard features
 
@@ -439,14 +494,14 @@ npx claw-bench dashboard
 
 ### Development mode
 
-For frontend development with hot reload:
+Two terminals — **API** (Express + SQLite) and **Vite** (hot reload; proxies **`/api`** to the API port):
 
 ```bash
-# Terminal 1: start the API server
+# Terminal 1 — API on 3077 (must match Vite proxy in dashboard/vite.config.ts)
 npm run build
 npx claw-bench dashboard --port 3077
 
-# Terminal 2: start the Vite dev server (proxies /api to 3077)
+# Terminal 2 — UI dev server
 npm run dashboard:dev
 # Open http://localhost:5173
 ```
