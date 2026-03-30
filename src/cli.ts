@@ -7,7 +7,13 @@ import { DEFAULT_CONFIG, SkillMetadata } from "./types.js";
 import { benchmark } from "./runner.js";
 import { printReport, writeJsonReport, printComparison } from "./reporter.js";
 import { pushToLeaderboard } from "./leaderboard.js";
-import { importSkillMetadata, runCount, dbPath, metadataCount } from "./store.js";
+import {
+  importSkillMetadata,
+  exportSkillMetadata,
+  runCount,
+  dbPath,
+  metadataCount,
+} from "./store.js";
 import {
   scoreDistributions,
   thresholdCalibration,
@@ -20,6 +26,11 @@ import {
   scoreVsDependencyCount,
   installGrowthVsScore,
 } from "./analyze.js";
+
+/** Default `SkillMetadata[]` path (alongside `clawhub/skills-seed.json`). */
+function defaultClawhubSkillsMetadataPath(): string {
+  return path.join(process.cwd(), "clawhub", "skills-metadata.json");
+}
 
 const program = new Command();
 
@@ -320,11 +331,29 @@ data
   });
 
 data
-  .command("import-metadata <file>")
-  .description("Import full skill metadata from a JSON file (array of SkillMetadata objects)")
-  .action(async (file: string) => {
-    const resolved = path.resolve(file);
-    if (!fs.existsSync(resolved)) { console.error(`File not found: ${resolved}`); process.exit(1); }
+  .command("export-metadata [file]")
+  .description(
+    "Write SkillMetadata[] JSON from the local DB (install/version/deps joined). Default file: clawhub/skills-metadata.json"
+  )
+  .action(async (file?: string) => {
+    const resolved = path.resolve(file ?? defaultClawhubSkillsMetadataPath());
+    const records = await exportSkillMetadata();
+    fs.mkdirSync(path.dirname(resolved), { recursive: true });
+    fs.writeFileSync(resolved, JSON.stringify(records, null, 2) + "\n", "utf-8");
+    console.log(`\nWrote ${records.length} skill(s) to ${resolved}\n`);
+  });
+
+data
+  .command("import-metadata [file]")
+  .description(
+    "Import full skill metadata from JSON (SkillMetadata[]). Default file: clawhub/skills-metadata.json"
+  )
+  .action(async (file?: string) => {
+    const resolved = path.resolve(file ?? defaultClawhubSkillsMetadataPath());
+    if (!fs.existsSync(resolved)) {
+      console.error(`File not found: ${resolved}\nPass a path or run sync-clawhub-metadata --json-only first.\n`);
+      process.exit(1);
+    }
     let records: unknown[];
     try { records = JSON.parse(fs.readFileSync(resolved, "utf-8")); }
     catch (e) { console.error(`Invalid JSON: ${e}`); process.exit(1); }
@@ -336,6 +365,173 @@ data
     console.log(`  Version history rows:  ${result.versions}`);
     console.log(`  Dependency edges:      ${result.deps}\n`);
   });
+
+data
+  .command("sync-clawhub-metadata")
+  .description(
+    "Fetch per-skill metadata from ClawHub (Convex getBySlug + listVersionsPage). After every fetch (except --dry-run), writes clawhub/skills-metadata.json; then imports into SQLite unless --json-only."
+  )
+  .argument("[slugs...]", "Skill slugs to fetch (optional if --from-seed)")
+  .option(
+    "--from-seed",
+    "Also read slugs from clawhub/skills-seed.json (merge with positional slugs)"
+  )
+  .option("--concurrency <n>", "Parallel skills", (v) => parseInt(v, 10), 2)
+  .option(
+    "--delay-ms <n>",
+    "Pause after each skill per worker (rate limit)",
+    (v) => parseInt(v, 10),
+    0
+  )
+  .option("--limit <n>", "Process at most N slugs after deduplication", (v) => parseInt(v, 10))
+  .option("--dry-run", "Print JSON to stdout only; no JSON file and no database write")
+  .option(
+    "--json-out <file>",
+    "Also write SkillMetadata[] to this path (default clawhub/skills-metadata.json is always written when not --dry-run)"
+  )
+  .option(
+    "--json-only",
+    "Only write JSON (default clawhub/skills-metadata.json); skip SQLite, then run: data import-metadata"
+  )
+  .option("-q, --quiet", "Suppress per-skill progress lines")
+  .action(
+    async (
+      slugs: string[],
+      opts: {
+        fromSeed?: boolean;
+        concurrency: number;
+        delayMs?: number;
+        limit?: number;
+        dryRun?: boolean;
+        jsonOut?: string;
+        jsonOnly?: boolean;
+        quiet?: boolean;
+      }
+    ) => {
+      const seedPath = path.join(process.cwd(), "clawhub", "skills-seed.json");
+      const merged: string[] = [...slugs];
+      if (opts.fromSeed) {
+        if (!fs.existsSync(seedPath)) {
+          console.error(`Missing seed file: ${seedPath}\nRun: claw-bench clawhub crawl\n`);
+          process.exit(1);
+        }
+        const raw = JSON.parse(fs.readFileSync(seedPath, "utf-8")) as Array<{ slug?: string }>;
+        for (const row of raw) {
+          if (typeof row.slug === "string") merged.push(row.slug);
+        }
+      }
+      const unique = [...new Set(merged.map((s) => s.trim()).filter(Boolean))];
+      const capped =
+        typeof opts.limit === "number" && Number.isFinite(opts.limit) && opts.limit > 0
+          ? unique.slice(0, opts.limit)
+          : unique;
+
+      if (capped.length === 0) {
+        console.error(
+          "No slugs to fetch. Pass slugs or use --from-seed with clawhub/skills-seed.json.\n"
+        );
+        process.exit(1);
+      }
+
+      const { collectClawHubMetadataForSlugs } = await import("./clawhub-metadata-collector.js");
+      const recordedAt = new Date().toISOString();
+      console.log(
+        `\nFetching ClawHub metadata for ${capped.length} skill(s) (concurrency=${opts.concurrency})…\n`
+      );
+
+      const defaultResolved = path.resolve(defaultClawhubSkillsMetadataPath());
+
+      const onSkillProgress = opts.quiet
+        ? undefined
+        : (info: {
+            slug: string;
+            index: number;
+            total: number;
+            ok: boolean;
+            error?: string;
+          }) => {
+            const tag = info.ok ? "ok" : `fail${info.error ? `: ${info.error}` : ""}`;
+            console.log(`  [${info.index + 1}/${info.total}] ${info.slug} — ${tag}`);
+          };
+
+      if (opts.dryRun) {
+        const { records, errors } = await collectClawHubMetadataForSlugs(capped, recordedAt, {
+          concurrency: opts.concurrency,
+          delayMs: opts.delayMs ?? 0,
+          onSkill: onSkillProgress,
+        });
+        console.log(JSON.stringify(records, null, 2));
+        if (errors.length > 0) {
+          console.error(`\n${errors.length} slug(s) had errors (see stderr summary above).`);
+        }
+        console.log(
+          `\nDry-run: no JSON file or database write. Re-run without --dry-run to persist.\n`
+        );
+        return;
+      }
+
+      const jsonWritePaths = [defaultResolved];
+      if (opts.jsonOut !== undefined) {
+        const custom = path.resolve(opts.jsonOut);
+        if (custom !== defaultResolved) jsonWritePaths.push(custom);
+      }
+      for (const out of jsonWritePaths) {
+        fs.mkdirSync(path.dirname(out), { recursive: true });
+        fs.writeFileSync(out, "[]\n", "utf-8");
+      }
+      if (!opts.quiet) {
+        console.log(
+          `\nWriting progress to:\n${jsonWritePaths.map((p) => `  ${p}`).join("\n")}\n` +
+            `(rewritten after each successful skill; full catalog runs can take a long time.)\n`
+        );
+      }
+
+      const { records, errors } = await collectClawHubMetadataForSlugs(capped, recordedAt, {
+        concurrency: opts.concurrency,
+        delayMs: opts.delayMs ?? 0,
+        onFlush: (snap) => {
+          const jsonPayload = JSON.stringify(snap, null, 2) + "\n";
+          for (const out of jsonWritePaths) {
+            fs.writeFileSync(out, jsonPayload, "utf-8");
+          }
+        },
+        onSkill: onSkillProgress,
+      });
+
+      console.log(
+        `\nWrote ${records.length} record(s) to:\n${jsonWritePaths.map((p) => `  ${p}`).join("\n")}\n`
+      );
+
+      if (opts.jsonOnly) {
+        if (errors.length > 0) {
+          console.log(`\nSkipped / failed slugs: ${errors.length}`);
+          for (const e of errors.slice(0, 20)) {
+            console.log(`  - ${e.slug}: ${e.message}`);
+          }
+          if (errors.length > 20) console.log(`  … and ${errors.length - 20} more`);
+        }
+        console.log(
+          `JSON-only: no database write. Import with:\n  claw-bench data import-metadata ${defaultResolved}\n`
+        );
+        return;
+      }
+
+      const result = await importSkillMetadata(records as SkillMetadata[]);
+      console.log(`\nImported:`);
+      console.log(`  Skills upserted:       ${result.upserted}`);
+      console.log(`  Install snapshots:     ${result.installSnapshots}`);
+      console.log(`  Version history rows:  ${result.versions}`);
+      console.log(`  Dependency edges:      ${result.deps}`);
+      if (errors.length > 0) {
+        console.log(`\nSkipped / failed slugs: ${errors.length}`);
+        for (const e of errors.slice(0, 20)) {
+          console.log(`  - ${e.slug}: ${e.message}`);
+        }
+        if (errors.length > 20) console.log(`  … and ${errors.length - 20} more`);
+      }
+      console.log();
+    }
+  );
 
 data
   .command("authors")

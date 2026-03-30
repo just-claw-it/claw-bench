@@ -7,7 +7,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
-import type { ClawHubAnalysis, ClawHubSkillEntry } from "../types.js";
+import type { ClawHubAnalysis, ClawHubSkillEntry, SkillMetadata } from "../types.js";
 
 const entry: ClawHubSkillEntry = {
   slug: "store-test-skill",
@@ -294,6 +294,145 @@ describe("deleteClawHubAnalysis helpers", () => {
       { slug: "s1", llm_model: "m2" },
       { slug: "s2", llm_model: "m1" },
     ]);
+  });
+});
+
+describe("importSkillMetadata", () => {
+  const dbFile = path.join(os.tmpdir(), `claw-bench-import-meta-${process.pid}.db`);
+  let prevDb: string | undefined;
+
+  before(() => {
+    prevDb = process.env.CLAW_BENCH_DB;
+    process.env.CLAW_BENCH_DB = dbFile;
+    if (fs.existsSync(dbFile)) fs.unlinkSync(dbFile);
+  });
+
+  after(() => {
+    if (prevDb === undefined) delete process.env.CLAW_BENCH_DB;
+    else process.env.CLAW_BENCH_DB = prevDb;
+    try {
+      if (fs.existsSync(dbFile)) fs.unlinkSync(dbFile);
+    } catch {
+      /* ignore */
+    }
+  });
+
+  function sampleMetadata(overrides: Partial<SkillMetadata> = {}): SkillMetadata {
+    const recordedAt = "2026-03-01T00:00:00.000Z";
+    return {
+      skillName: "meta-test-skill",
+      author: "test-author",
+      verifiedAuthor: true,
+      tags: ["demo", "test"],
+      starRating: 4.2,
+      starCount: 10,
+      latestVersion: "1.1.0",
+      firstPublishedAt: "2026-01-01T00:00:00.000Z",
+      lastUpdatedAt: "2026-03-01T00:00:00.000Z",
+      dependencyNames: ["dep-a", "dep-b"],
+      installHistory: [{ recordedAt, installCount: 100 }],
+      versionHistory: [
+        { version: "1.0.0", publishedAt: "2026-01-01T00:00:00.000Z", isLatest: false },
+        { version: "1.1.0", publishedAt: "2026-03-01T00:00:00.000Z", isLatest: true },
+      ],
+      ...overrides,
+    };
+  }
+
+  it("persists all tables and skips duplicate install snapshots on re-import", async () => {
+    const { importSkillMetadata, query } = await import("../store.js");
+
+    const meta = sampleMetadata();
+    const r1 = await importSkillMetadata([meta]);
+    assert.deepEqual(
+      { upserted: r1.upserted, installSnapshots: r1.installSnapshots, versions: r1.versions, deps: r1.deps },
+      { upserted: 1, installSnapshots: 1, versions: 2, deps: 2 }
+    );
+
+    const rows = await query<{
+      skill_name: string;
+      author: string;
+      verified_author: number;
+      star_count: number;
+      latest_version: string;
+      total_versions: number;
+      dependency_count: number;
+    }>("SELECT skill_name, author, verified_author, star_count, latest_version, total_versions, dependency_count FROM skill_metadata WHERE skill_name = ?", [
+      "meta-test-skill",
+    ]);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.author, "test-author");
+    assert.equal(rows[0]?.verified_author, 1);
+    assert.equal(rows[0]?.star_count, 10);
+    assert.equal(rows[0]?.latest_version, "1.1.0");
+    assert.equal(rows[0]?.total_versions, 2);
+    assert.equal(rows[0]?.dependency_count, 2);
+
+    const tags = await query<{ tags: string }>("SELECT tags FROM skill_metadata WHERE skill_name = ?", [
+      "meta-test-skill",
+    ]);
+    assert.deepEqual(JSON.parse(tags[0]!.tags), ["demo", "test"]);
+
+    const installs = await query<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM install_history WHERE skill_name = ?",
+      ["meta-test-skill"]
+    );
+    assert.equal(installs[0]?.n, 1);
+
+    const vers = await query<{ version: string; is_latest: number }>(
+      "SELECT version, is_latest FROM version_history WHERE skill_name = ? ORDER BY version",
+      ["meta-test-skill"]
+    );
+    assert.equal(vers.length, 2);
+    assert.deepEqual(
+      vers.map((v) => ({ version: v.version, is_latest: v.is_latest })),
+      [
+        { version: "1.0.0", is_latest: 0 },
+        { version: "1.1.0", is_latest: 1 },
+      ]
+    );
+
+    const deps = await query<{ depends_on: string }>(
+      "SELECT depends_on FROM skill_dependencies WHERE skill_name = ? ORDER BY depends_on",
+      ["meta-test-skill"]
+    );
+    assert.deepEqual(
+      deps.map((d) => d.depends_on),
+      ["dep-a", "dep-b"]
+    );
+
+    const r2 = await importSkillMetadata([meta]);
+    assert.equal(r2.installSnapshots, 0, "same recordedAt should not insert another install row");
+
+    const r3 = await importSkillMetadata([
+      sampleMetadata({
+        installHistory: [
+          { recordedAt: "2026-03-01T00:00:00.000Z", installCount: 100 },
+          { recordedAt: "2026-04-01T00:00:00.000Z", installCount: 150 },
+        ],
+      }),
+    ]);
+    assert.equal(r3.installSnapshots, 1);
+    const installsAfter = await query<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM install_history WHERE skill_name = ?",
+      ["meta-test-skill"]
+    );
+    assert.equal(installsAfter[0]?.n, 2);
+  });
+
+  it("exportSkillMetadata reconstructs SkillMetadata[] from the DB", async () => {
+    const { exportSkillMetadata } = await import("../store.js");
+    const all = await exportSkillMetadata();
+    const one = all.find((s) => s.skillName === "meta-test-skill");
+    assert.ok(one);
+    assert.equal(one.author, "test-author");
+    assert.equal(one.verifiedAuthor, true);
+    assert.deepEqual(one.tags, ["demo", "test"]);
+    assert.equal(one.starCount, 10);
+    assert.equal(one.latestVersion, "1.1.0");
+    assert.equal(one.installHistory.length, 2);
+    assert.equal(one.versionHistory.length, 2);
+    assert.deepEqual(one.dependencyNames.sort(), ["dep-a", "dep-b"]);
   });
 });
 

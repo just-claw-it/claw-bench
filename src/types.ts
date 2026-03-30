@@ -165,8 +165,8 @@ export interface LeaderboardPushResult {
 
 /**
  * Full metadata for a ClawHub skill.
- * Consumed by importSkillMetadata() — shape the API response or manual dump
- * to match this interface before importing.
+ * Consumed by importSkillMetadata() — use `data sync-clawhub-metadata` to pull a
+ * best-effort subset from public Convex, or match this shape in a manual JSON dump.
  */
 export interface SkillMetadata {
   skillName: string;

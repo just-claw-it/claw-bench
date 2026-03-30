@@ -1,0 +1,21 @@
+[
+  {
+    "skillName": "my-skill",
+    "author": "someone",
+    "verifiedAuthor": false,
+    "tags": ["example", "demo"],
+    "starRating": 4.5,
+    "starCount": 12,
+    "latestVersion": "1.0.0",
+    "firstPublishedAt": "2025-01-01T00:00:00.000Z",
+    "lastUpdatedAt": "2026-01-15T00:00:00.000Z",
+    "dependencyNames": ["other-skill"],
+    "installHistory": [
+      { "recordedAt": "2026-01-01T00:00:00.000Z", "installCount": 1000 },
+      { "recordedAt": "2026-02-01T00:00:00.000Z", "installCount": 1200 }
+    ],
+    "versionHistory": [
+      { "version": "1.0.0", "publishedAt": "2025-01-01T00:00:00.000Z", "isLatest": true }
+    ]
+  }
+]

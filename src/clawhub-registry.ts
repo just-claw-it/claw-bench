@@ -51,10 +51,43 @@ interface RawPageItem {
   } | null;
 }
 
-function convexUrl(): string {
+export function convexUrl(): string {
   return (
     process.env.CLAWHUB_CONVEX_URL?.replace(/\/$/, "") ?? DEFAULT_CONVEX_URL
   );
+}
+
+/**
+ * POST to Convex `/api/query` and return the successful `value` payload.
+ * Used by catalog crawl and by richer per-skill metadata collection.
+ */
+export async function convexQueryValue<T>(
+  path: string,
+  args: Record<string, unknown> = {}
+): Promise<T> {
+  const res = await fetch(`${convexUrl()}/api/query`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, format: "json", args }),
+  });
+
+  if (!res.ok) {
+    throw new Error(
+      `Convex query failed: HTTP ${res.status} ${await res.text().catch(() => "")}`
+    );
+  }
+
+  const json = (await res.json()) as {
+    status: string;
+    value?: T;
+    errorMessage?: string;
+  };
+
+  if (json.status !== "success" || json.value === undefined) {
+    throw new Error(json.errorMessage ?? "Convex query returned no value");
+  }
+
+  return json.value;
 }
 
 /** Compact number like the ClawHub UI (e.g. 295000 → "295k"). */
@@ -130,31 +163,7 @@ export async function fetchRegistryPage(
     },
   };
 
-  const res = await fetch(`${convexUrl()}/api/query`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    throw new Error(
-      `Convex query failed: HTTP ${res.status} ${await res.text().catch(() => "")}`
-    );
-  }
-
-  const json = (await res.json()) as {
-    status: string;
-    value?: RawPage;
-    errorMessage?: string;
-  };
-
-  if (json.status !== "success" || !json.value) {
-    throw new Error(
-      json.errorMessage ?? "Convex query returned no value"
-    );
-  }
-
-  const { page, hasMore, nextCursor } = json.value;
+  const { page, hasMore, nextCursor } = await convexQueryValue<RawPage>(body.path, body.args);
   const entries: ClawHubSkillEntry[] = [];
   for (const row of page ?? []) {
     const e = mapItem(row);

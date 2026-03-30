@@ -4,6 +4,8 @@ dashboard/dist/
 dashboard/node_modules/
 *.db
 bench-reports/
+# Local research drafts, Parquet exports, Claude drafting packs (not tracked)
+paper/
 .DS_Store
 Thumbs.db
 *.tmp
@@ -17,6 +19,7 @@ clawhub-skills/
 clawhub/zip/
 # Crawled registry (can be large); Docker/README use empty `[]` or mount your own
 clawhub/skills-seed.json
+clawhub/skills-metadata.json
 .env
 .env.*
 !.env.example

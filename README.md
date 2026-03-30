@@ -68,7 +68,7 @@ docker compose up --build
 
 - **SQLite** is stored on the **`clawbench-data`** volume at **`CLAW_BENCH_DB=/data/bench.db`** (survives container restarts).
 - The HTTP server binds **`0.0.0.0`** by default so published ports work; set **`CLAW_BENCH_BIND`** (e.g. `127.0.0.1`) to override.
-- **`NODE_ENV=production`** (set in the image) hides local smoke-test runs (e.g. `test-skills/echo-skill`) from dashboard API responses. Set **`CLAW_BENCH_SHOW_TEST_RUNS=1`** in the container environment if you want them listed.
+- **`NODE_ENV=production`** (set in the image) hides local example runs (e.g. `examples/echo-skill`) from dashboard API responses. Set **`CLAW_BENCH_SHOW_TEST_RUNS=1`** in the container environment if you want them listed.
 - The image ships an **empty** `clawhub/skills-seed.json` (`[]`). Populate the catalog by **exec**’ing into the container, or **bind-mount** seed and optionally `clawhub/zip/` for downloads.
 - For `clawhub analyze --llm` in container, set provider env vars in `docker-compose.yml` (`CLAWHUB_LLM_PROVIDER` + Ollama/OpenAI/Anthropic vars). Examples are commented in the compose file.
 
@@ -82,8 +82,9 @@ Mount examples in `docker-compose.yml`:
 ```yaml
 volumes:
   - ./clawhub/skills-seed.json:/app/clawhub/skills-seed.json:ro
-  # optional: persist downloaded zips
+  # optional: persist downloaded zips or metadata JSON from `data sync-clawhub-metadata`
   - ./clawhub/zip:/app/clawhub/zip
+  # - ./clawhub/skills-metadata.json:/app/clawhub/skills-metadata.json
 ```
 
 Plain **Docker** (no Compose): `docker build -t claw-bench .` then  
@@ -101,6 +102,17 @@ npx claw-bench clawhub crawl --dry-run
 npx claw-bench clawhub crawl --seed-only
 npx claw-bench clawhub crawl --sort stars
 ```
+
+**Skill metadata** (Convex `skills:getBySlug` + `skills:listVersionsPage`) — populates SQLite tables **`skill_metadata`**, **`install_history`**, **`version_history`**, and **`skill_dependencies`** for analytics (e.g. score vs stars, tags, deps). Slug lists come from **`clawhub/skills-seed.json`** (same directory layout as crawl). Default JSON path is **`clawhub/skills-metadata.json`** under your **shell’s current working directory** (not the package install path—run from the repo root or set paths explicitly).
+
+| Step | Command |
+|------|---------|
+| Fetch only → JSON | `npx claw-bench data sync-clawhub-metadata --from-seed --json-only` |
+| JSON → SQLite | `npx claw-bench data import-metadata` (default file: `clawhub/skills-metadata.json`) |
+| Fetch + JSON + SQLite | `npx claw-bench data sync-clawhub-metadata --from-seed` |
+| SQLite → JSON backup | `npx claw-bench data export-metadata` |
+
+Unless **`--dry-run`**, sync writes **`clawhub/skills-metadata.json`** immediately as `[]`, then **rewrites the full array after each successful skill** until done. Large catalogs take a long time; use **`--limit <n>`** to smoke-test. **`--concurrency`** (default `2`) and **`--delay-ms`** reduce load on Convex; **`--json-out <path>`** writes an **additional** copy alongside the default file. **`--quiet`** hides per-slug lines. Example **`SkillMetadata[]`** shape: **`examples/skill-metadata-import.example.json`**.
 
 **Download** — saves zips under **`clawhub/zip/`** (legacy zips in `clawhub/` are moved there on the next `download --all`). Existing non-empty zips are skipped; failed slugs succeed on re-run. Rate limits (HTTP 429) use `Retry-After` and backoff; tune parallelism with **`CLAWHUB_DOWNLOAD_CONCURRENCY`** (default `1`).
 
@@ -213,7 +225,7 @@ Override the Convex deployment URL if ClawHub moves (rare):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CLAWHUB_CONVEX_URL` | Convex **.cloud** URL for `/api/query` | `https://wry-manatee-359.convex.cloud` |
+| `CLAWHUB_CONVEX_URL` | Convex **.cloud** URL for `/api/query` (crawl + `data sync-clawhub-metadata`) | `https://wry-manatee-359.convex.cloud` |
 
 ## Quick start
 
@@ -302,7 +314,26 @@ Query the local benchmark database for analytics.
 | `stars` | Score vs star rating correlation |
 | `deps` | Score vs dependency count |
 | `growth` | Install growth vs score |
-| `import-metadata <file>` | Import skill metadata from JSON |
+| `export-metadata [file]` | Dump `SkillMetadata[]` from SQLite (default file: `clawhub/skills-metadata.json`) |
+| `import-metadata [file]` | Import metadata JSON into SQLite (default file: `clawhub/skills-metadata.json`) |
+| `sync-clawhub-metadata [slugs...]` | Fetch from ClawHub Convex; writes default JSON (unless `--dry-run`); imports DB unless `--json-only` (details above) |
+
+**`sync-clawhub-metadata` flags**
+
+| Flag | Role |
+|------|------|
+| `--from-seed` | Read slugs from `clawhub/skills-seed.json` (merge with any positional slugs) |
+| `--json-only` | Write JSON only; skip `importSkillMetadata` |
+| `--json-out <file>` | Extra copy of the same JSON (default path is always written when not `--dry-run`) |
+| `--dry-run` | Print JSON to stdout; **no** file write and **no** DB write |
+| `--concurrency <n>` | Parallel fetches (default `2`) |
+| `--delay-ms <n>` | Pause after each skill per worker (rate limiting) |
+| `--limit <n>` | Cap how many slugs to process after deduplication |
+| `-q` / `--quiet` | Suppress per-slug progress lines |
+
+See **Skill metadata** under [ClawHub: crawl, download, analyze](#clawhub-crawl-download-analyze) for the full workflow. **`CLAWHUB_CONVEX_URL`** targets the same deployment as crawl. **`clawhub/skills-metadata.json`** is **gitignored**—enable “show ignored files” in your editor if you do not see it.
+
+**Public API limits** (best-effort vs. full admin dumps): Convex exposes **version history**, **rough install totals** (`installsAllTime` or downloads), **star counts**, and **official** badges (mapped to `verifiedAuthor`). It does **not** expose a full historical install time series, a separate 0–5 **average** star rating (`starRating` stays null), or stable **browse tags** as string arrays (often empty). Skill-to-skill dependencies appear only when `clawdis` includes recognizable slug lists or `install` rows with `kind: "skill"`.
 
 ## Configuration
 
@@ -315,7 +346,7 @@ Query the local benchmark database for analytics.
 | `CLAW_BENCH_DB` | SQLite database path | `~/.claw-bench/bench.db` |
 | `CLAWHUB_API_KEY` | ClawHub leaderboard API key | — |
 | `CLAWHUB_API_URL` | ClawHub benchmark leaderboard `POST` URL | `https://api.clawhub.dev/v1/leaderboard` (legacy default; **override** if that host does not resolve) |
-| `CLAWHUB_CONVEX_URL` | Convex `.cloud` base URL for registry crawl (`clawhub crawl`) | `https://wry-manatee-359.convex.cloud` |
+| `CLAWHUB_CONVEX_URL` | Convex `.cloud` base URL for **`clawhub crawl`** and **`data sync-clawhub-metadata`** | `https://wry-manatee-359.convex.cloud` |
 | `ANTHROPIC_API_KEY` | API key for semantic check / catalog LLM | — |
 | `ANTHROPIC_MODEL` | Model for semantic check / catalog LLM | `claude-haiku-4-5-20251001` |
 | `CLAWHUB_LLM_PROVIDER` | Catalog LLM: `anthropic` \| `ollama` \| `openai` | — |
@@ -331,7 +362,7 @@ Query the local benchmark database for analytics.
 | `CLAW_BENCH_DB_LOCK_STALE_MS` | Age after which a stale DB lock file is auto-removed | `21600000` (6h) |
 | `CLAW_BENCH_DB_LOCK_TIMEOUT_MS` | Max wait for DB lock (`0` = wait forever) | `0` |
 
-Local artifacts (`clawhub/zip/`, `clawhub-skills/`, large `skills-seed.json`, `bench.db`) are **not** meant to be committed—see `.gitignore`.
+Local artifacts (`clawhub/zip/`, `clawhub-skills/`, `clawhub/skills-seed.json`, `clawhub/skills-metadata.json`, `bench.db`) are **not** meant to be committed—see `.gitignore`.
 
 ## Writing `bench.json`
 
@@ -353,6 +384,8 @@ To enable correctness scoring, create a `bench.json` alongside `skill.json`:
 Each pair defines an input and the expected output keys/values. Correctness is the fraction of pairs that produce matching output.
 
 ## Skill structure
+
+Example assets live under **`examples/`**: a runnable linear skill with **`bench.json`** is **`examples/echo-skill/`**; a **`SkillMetadata[]`** sample for import is **`examples/skill-metadata-import.example.json`**.
 
 A ClawHub skill is a directory containing:
 
@@ -428,7 +461,7 @@ npm run build
 npm test
 ```
 
-`dist/` is not committed; run `npm run build` after pulling. Dashboard: `npm run dashboard:install` and `npm run dashboard:build`. Tests: `npm test` (root) or `npm run test:run` after a build.
+`dist/` is not committed; run `npm run build` after pulling. Dashboard: `npm run dashboard:install` and `npm run dashboard:build`. Tests: `npm test` (root) or `npm run test:run` after a build. Set **`CLAWHUB_SKIP_NETWORK_SMOKE=1`** to skip the optional Convex smoke test (`data sync-clawhub-metadata` dry-run) when offline.
 
 ## License
 

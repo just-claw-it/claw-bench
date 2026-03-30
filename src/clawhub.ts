@@ -11,7 +11,7 @@ import { ClawHubSkillEntry } from "./types.js";
 import { upsertClawHubSkill } from "./store.js";
 
 const DOWNLOAD_BASE = "https://wry-manatee-359.convex.site/api/v1/download";
-const MAX_RETRIES = 5;
+const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 2000;
 /** Parallel downloads; default 1 to avoid HTTP 429 from bulk fetches. Override: CLAWHUB_DOWNLOAD_CONCURRENCY */
 const CONCURRENCY = Math.max(

@@ -36,7 +36,7 @@ jobs:
 
       - name: Smoke-test against echo-skill
         run: |
-          node dist/cli.js run ./test-skills/echo-skill \
+          node dist/cli.js run ./examples/echo-skill \
             --output-dir ./bench-reports
         # Consistency will score 0 without Ollama — expected in CI.
         # The smoke test validates the harness runs end-to-end without crashing.
@@ -73,7 +73,7 @@ jobs:
 
       - name: Benchmark
         run: |
-          node dist/cli.js run ./test-skills/echo-skill \
+          node dist/cli.js run ./examples/echo-skill \
             --output-dir ./bench-reports
 
       - name: Push to leaderboard

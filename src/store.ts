@@ -505,6 +505,115 @@ export function importSkillMetadata(
   });
 }
 
+/**
+ * Rebuild {@link SkillMetadata}[] from SQLite for backup or `import-metadata` on another machine.
+ */
+export function exportSkillMetadata(): Promise<SkillMetadata[]> {
+  return serialize(async () => {
+    const SQL = await getSql();
+    const fp = dbPath();
+    if (!fs.existsSync(fp)) return [];
+
+    const db = loadDb(SQL, fp);
+    try {
+      const mainStmt = db.prepare(
+        `SELECT skill_name, author, verified_author, tags, star_rating, star_count, latest_version,
+                first_published_at, last_updated_at
+         FROM skill_metadata ORDER BY skill_name`
+      );
+
+      const out: SkillMetadata[] = [];
+      while (mainStmt.step()) {
+        const r = mainStmt.getAsObject() as {
+          skill_name: string;
+          author: string;
+          verified_author: number;
+          tags: string;
+          star_rating: number | null;
+          star_count: number;
+          latest_version: string | null;
+          first_published_at: string | null;
+          last_updated_at: string | null;
+        };
+
+        let tags: string[] = [];
+        try {
+          const p = JSON.parse(r.tags) as unknown;
+          if (Array.isArray(p)) {
+            tags = p.filter((x): x is string => typeof x === "string");
+          }
+        } catch {
+          /* ignore invalid JSON */
+        }
+
+        const instStmt = db.prepare(
+          `SELECT recorded_at, install_count FROM install_history WHERE skill_name = ? ORDER BY recorded_at ASC`
+        );
+        instStmt.bind([r.skill_name]);
+        const installHistory: SkillMetadata["installHistory"] = [];
+        while (instStmt.step()) {
+          const row = instStmt.getAsObject() as { recorded_at: string; install_count: number };
+          installHistory.push({
+            recordedAt: row.recorded_at,
+            installCount: row.install_count,
+          });
+        }
+        instStmt.free();
+
+        const verStmt = db.prepare(
+          `SELECT version, published_at, is_latest FROM version_history WHERE skill_name = ?
+           ORDER BY (published_at IS NULL), published_at ASC, version ASC`
+        );
+        verStmt.bind([r.skill_name]);
+        const versionHistory: SkillMetadata["versionHistory"] = [];
+        while (verStmt.step()) {
+          const row = verStmt.getAsObject() as {
+            version: string;
+            published_at: string | null;
+            is_latest: number;
+          };
+          versionHistory.push({
+            version: row.version,
+            publishedAt: row.published_at,
+            isLatest: row.is_latest === 1,
+          });
+        }
+        verStmt.free();
+
+        const depStmt = db.prepare(
+          `SELECT depends_on FROM skill_dependencies WHERE skill_name = ? ORDER BY depends_on ASC`
+        );
+        depStmt.bind([r.skill_name]);
+        const dependencyNames: string[] = [];
+        while (depStmt.step()) {
+          const row = depStmt.getAsObject() as { depends_on: string };
+          dependencyNames.push(row.depends_on);
+        }
+        depStmt.free();
+
+        out.push({
+          skillName: r.skill_name,
+          author: r.author,
+          verifiedAuthor: r.verified_author === 1,
+          tags,
+          starRating: r.star_rating ?? null,
+          starCount: r.star_count,
+          latestVersion: r.latest_version ?? null,
+          firstPublishedAt: r.first_published_at ?? null,
+          lastUpdatedAt: r.last_updated_at ?? null,
+          dependencyNames,
+          installHistory,
+          versionHistory,
+        });
+      }
+      mainStmt.free();
+      return out;
+    } finally {
+      db.close();
+    }
+  });
+}
+
 // ── Low-level query helper ────────────────────────────────────────────────
 
 export function query<T = Record<string, unknown>>(
