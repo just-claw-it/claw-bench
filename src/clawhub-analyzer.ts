@@ -16,7 +16,7 @@ import {
   ClawHubSkillEntry,
   ClawHubSourceInsights,
 } from "./types.js";
-import { collectFileStats } from "./clawhub.js";
+import { collectFileStats, readdirSafeDirents, readdirSafeNames } from "./clawhub.js";
 import { computeOverallComposite } from "./clawhub-scoring.js";
 
 // ── YAML frontmatter parsing ───────────────────────────────────────────────
@@ -185,7 +185,7 @@ function scanSecurity(skillDir: string): SecurityScanResult {
 
   const walk = (dir: string, depth = 0) => {
     if (depth > 10) return;
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    for (const entry of readdirSafeDirents(dir)) {
       if (entry.name === "node_modules" || entry.name === ".git") continue;
       if (entry.isSymbolicLink()) continue;
       const full = path.join(dir, entry.name);
@@ -255,7 +255,7 @@ export function analyzeCodeQuality(skillDir: string): number | null {
 
   const walk = (dir: string, depth = 0) => {
     if (depth > 10) return;
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    for (const entry of readdirSafeDirents(dir)) {
       if (entry.name === "node_modules" || entry.name === ".git") continue;
       if (entry.isSymbolicLink()) continue;
       const full = path.join(dir, entry.name);
@@ -330,7 +330,7 @@ export function analyzeMaintainability(
   else if (stats.fileCount === 1) score += 0.5;
 
   // Clean directory structure
-  const entries = fs.readdirSync(skillDir);
+  const entries = readdirSafeNames(skillDir);
   const hasCleanRoot = entries.includes("SKILL.md") && entries.length <= 15;
   if (hasCleanRoot) score += 1;
 
@@ -395,7 +395,7 @@ function sourceInsights(skillDir: string): ClawHubSourceInsights {
 
   const walk = (dir: string, depth = 0) => {
     if (depth > 10) return;
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    for (const entry of readdirSafeDirents(dir)) {
       if (entry.name === "node_modules" || entry.name === ".git") continue;
       if (entry.isSymbolicLink()) continue;
       const full = path.join(dir, entry.name);

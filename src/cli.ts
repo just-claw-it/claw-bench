@@ -930,6 +930,7 @@ clawhub
 
     const llmModel = opts.llm ? resolvedCatalogLlmModel() : "";
     let analyzed = 0;
+    let failed = 0;
     const total = toAnalyze.length;
 
     for (let i = 0; i < toAnalyze.length; i++) {
@@ -954,103 +955,113 @@ clawhub
         continue;
       }
 
-      let extractedDir: string;
-      let extractMs = 0;
-      const existing = path.join(skillsDir, entry.slug);
-      if (fs.existsSync(existing) && fs.existsSync(path.join(existing, "SKILL.md"))) {
-        extractedDir = existing;
-      } else {
-        const tEx0 = performance.now();
-        console.log(`  ${prog} ${entry.slug} — extracting...`);
-        extractedDir = await extractSkill(zipPath, skillsDir);
-        extractMs = Math.round(performance.now() - tEx0);
-      }
+      try {
+        let extractedDir: string;
+        let extractMs = 0;
+        const existing = path.join(skillsDir, entry.slug);
+        if (fs.existsSync(existing) && fs.existsSync(path.join(existing, "SKILL.md"))) {
+          extractedDir = existing;
+        } else {
+          const tEx0 = performance.now();
+          console.log(`  ${prog} ${entry.slug} — extracting...`);
+          extractedDir = await extractSkill(zipPath, skillsDir);
+          extractMs = Math.round(performance.now() - tEx0);
+        }
 
-      console.log(`  ${prog} ${entry.slug} — analyzing...`);
-      const result = await analyzeSkill(extractedDir, entry.slug, entry, { llm: !!opts.llm });
-      result.timing.extractMs = extractMs;
+        console.log(`  ${prog} ${entry.slug} — analyzing...`);
+        const result = await analyzeSkill(extractedDir, entry.slug, entry, { llm: !!opts.llm });
+        result.timing.extractMs = extractMs;
 
-      await upsertClawHubSkill(entry, {
-        zipPath,
-        extractedPath: extractedDir,
-        hasScripts: result.fileStats.hasScripts,
-        fileCount: result.fileStats.fileCount,
-        totalSizeBytes: result.fileStats.totalSizeBytes,
-        skillMdLength: result.fileStats.skillMdLength,
-      });
-      await storeClawHubAnalysis(result);
-      analyzed++;
+        await upsertClawHubSkill(entry, {
+          zipPath,
+          extractedPath: extractedDir,
+          hasScripts: result.fileStats.hasScripts,
+          fileCount: result.fileStats.fileCount,
+          totalSizeBytes: result.fileStats.totalSizeBytes,
+          skillMdLength: result.fileStats.skillMdLength,
+        });
+        await storeClawHubAnalysis(result);
+        analyzed++;
 
-      const s = result.staticAnalysis;
-      const pct = (v: number) => `${Math.round(v * 100)}%`;
-      const tm = result.timing;
-      const llmTime =
-        tm.llmMs === null ? "llm=n/a" : `llm=${tm.llmMs}ms`;
-      console.log(
-        `    ${prog} time: extract=${tm.extractMs}ms static=${tm.staticMs}ms ${llmTime} ` +
-        `fileStats=${tm.fileStatsMs}ms pipeline=${tm.pipelineMs}ms ` +
-        `(total ${tm.extractMs + tm.pipelineMs}ms)`
-      );
-      const insights = result.insights;
-      if (insights) {
-        const topLangs = insights.languageBreakdown
-          .slice(0, 3)
-          .map((x) => `${x.language}:${x.files}`)
-          .join(",");
-        const leak = insights.securityFindings.potentialDataLeakage ? "yes" : "no";
-        const cred = insights.credentialHygiene;
-        const credMismatch = `${cred.undeclaredCredentialVars.length}/${cred.declaredButUnusedCredentialVars.length}`;
-        const envCov = Math.round(cred.envExampleCoverage * 100);
-        const hygiene = Math.round(cred.hygieneScore * 100);
+        const s = result.staticAnalysis;
+        const pct = (v: number) => `${Math.round(v * 100)}%`;
+        const tm = result.timing;
+        const llmTime =
+          tm.llmMs === null ? "llm=n/a" : `llm=${tm.llmMs}ms`;
         console.log(
-          `    ${prog} attrs: complexity=${insights.complexity} primary=${insights.primaryLanguage ?? "n/a"} ` +
-          `langs=[${topLangs || "n/a"}] md_mismatch=${insights.undocumentedLanguages.length}/${insights.missingFromCode.length} ` +
-          `hygiene=${hygiene}%(${cred.hygieneLevel}) cred_mismatch=${credMismatch} env_example=${cred.hasEnvExample ? `${envCov}%` : "none"} leakRisk=${leak}`
+          `    ${prog} time: extract=${tm.extractMs}ms static=${tm.staticMs}ms ${llmTime} ` +
+          `fileStats=${tm.fileStatsMs}ms pipeline=${tm.pipelineMs}ms ` +
+          `(total ${tm.extractMs + tm.pipelineMs}ms)`
         );
-      }
-      console.log(
-        `    ${prog} static: doc=${pct(s.docQuality)} complete=${pct(s.completeness)} security=${pct(s.security)} ` +
-        `code=${s.codeQuality !== null ? pct(s.codeQuality) : "n/a"} maintain=${pct(s.maintainability)} → ${pct(s.staticComposite)}`
-      );
-      if (result.llmEval) {
-        const l = result.llmEval;
-        console.log(
-          `    ${prog} llm:    clarity=${pct(l.clarity)} useful=${pct(l.usefulness)} safety=${pct(l.safety)} ` +
-          `complete=${pct(l.completeness)} → ${pct(l.llmComposite)}`
-        );
-        if (l.sourceAudit) {
+        const insights = result.insights;
+        if (insights) {
+          const topLangs = insights.languageBreakdown
+            .slice(0, 3)
+            .map((x) => `${x.language}:${x.files}`)
+            .join(",");
+          const leak = insights.securityFindings.potentialDataLeakage ? "yes" : "no";
+          const cred = insights.credentialHygiene;
+          const credMismatch = `${cred.undeclaredCredentialVars.length}/${cred.declaredButUnusedCredentialVars.length}`;
+          const envCov = Math.round(cred.envExampleCoverage * 100);
+          const hygiene = Math.round(cred.hygieneScore * 100);
           console.log(
-            `    ${prog} llm-audit: align=${pct(l.sourceAudit.alignment)} security=${pct(l.sourceAudit.security)} ` +
-            `privacy=${pct(l.sourceAudit.privacy)} leakageRisk=${pct(l.sourceAudit.leakageRisk)}`
+            `    ${prog} attrs: complexity=${insights.complexity} primary=${insights.primaryLanguage ?? "n/a"} ` +
+            `langs=[${topLangs || "n/a"}] md_mismatch=${insights.undocumentedLanguages.length}/${insights.missingFromCode.length} ` +
+            `hygiene=${hygiene}%(${cred.hygieneLevel}) cred_mismatch=${credMismatch} env_example=${cred.hasEnvExample ? `${envCov}%` : "none"} leakRisk=${leak}`
           );
         }
-      }
-      console.log(`    ${prog} overall: ${pct(result.overallComposite)}`);
-
-      if (opts.cleanup) {
-        try {
-          if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
-          if (fs.existsSync(extractedDir)) {
-            fs.rmSync(extractedDir, { recursive: true, force: true });
+        console.log(
+          `    ${prog} static: doc=${pct(s.docQuality)} complete=${pct(s.completeness)} security=${pct(s.security)} ` +
+          `code=${s.codeQuality !== null ? pct(s.codeQuality) : "n/a"} maintain=${pct(s.maintainability)} → ${pct(s.staticComposite)}`
+        );
+        if (result.llmEval) {
+          const l = result.llmEval;
+          console.log(
+            `    ${prog} llm:    clarity=${pct(l.clarity)} useful=${pct(l.usefulness)} safety=${pct(l.safety)} ` +
+            `complete=${pct(l.completeness)} → ${pct(l.llmComposite)}`
+          );
+          if (l.sourceAudit) {
+            console.log(
+              `    ${prog} llm-audit: align=${pct(l.sourceAudit.alignment)} security=${pct(l.sourceAudit.security)} ` +
+              `privacy=${pct(l.sourceAudit.privacy)} leakageRisk=${pct(l.sourceAudit.leakageRisk)}`
+            );
           }
-          await upsertClawHubSkill(entry, {
-            zipPath: "",
-            extractedPath: "",
-            hasScripts: result.fileStats.hasScripts,
-            fileCount: result.fileStats.fileCount,
-            totalSizeBytes: result.fileStats.totalSizeBytes,
-            skillMdLength: result.fileStats.skillMdLength,
-          });
-          console.log(`    ${prog} cleaned up zip + extracted files`);
-        } catch (err) {
-          console.warn(
-            `    cleanup failed: ${err instanceof Error ? err.message : String(err)}`
-          );
         }
+        console.log(`    ${prog} overall: ${pct(result.overallComposite)}`);
+
+        if (opts.cleanup) {
+          try {
+            if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
+            if (fs.existsSync(extractedDir)) {
+              fs.rmSync(extractedDir, { recursive: true, force: true });
+            }
+            await upsertClawHubSkill(entry, {
+              zipPath: "",
+              extractedPath: "",
+              hasScripts: result.fileStats.hasScripts,
+              fileCount: result.fileStats.fileCount,
+              totalSizeBytes: result.fileStats.totalSizeBytes,
+              skillMdLength: result.fileStats.skillMdLength,
+            });
+            console.log(`    ${prog} cleaned up zip + extracted files`);
+          } catch (err) {
+            console.warn(
+              `    cleanup failed: ${err instanceof Error ? err.message : String(err)}`
+            );
+          }
+        }
+      } catch (err) {
+        failed++;
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`  ${prog} ${entry.slug} — error: ${msg}`);
       }
     }
 
-    console.log(`\nAnalyzed ${analyzed} skill(s).\n`);
+    console.log(
+      `\nAnalyzed ${analyzed} skill(s).` +
+        (failed > 0 ? ` ${failed} failed (see errors above).` : "") +
+        `\n`
+    );
   });
 
 clawhub

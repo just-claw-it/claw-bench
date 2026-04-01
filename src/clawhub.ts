@@ -227,6 +227,30 @@ export async function extractSkill(
   return extractDir;
 }
 
+// ── Safe directory reads (broken symlinks / races can make readdir throw ENOENT) ─
+
+/** `readdirSync` with `withFileTypes`; returns [] on ENOENT, ENOTDIR, EACCES. */
+export function readdirSafeDirents(dir: string): fs.Dirent[] {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true });
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "ENOENT" || err.code === "ENOTDIR" || err.code === "EACCES") return [];
+    throw e;
+  }
+}
+
+/** Plain `readdirSync`; returns [] on ENOENT, ENOTDIR, EACCES. */
+export function readdirSafeNames(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir);
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "ENOENT" || err.code === "ENOTDIR" || err.code === "EACCES") return [];
+    throw e;
+  }
+}
+
 // ── File stats ─────────────────────────────────────────────────────────────
 
 const SCRIPT_EXTENSIONS = new Set([
@@ -250,7 +274,7 @@ export function collectFileStats(dir: string): {
   const langSet = new Set<string>();
 
   const walk = (d: string) => {
-    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+    for (const entry of readdirSafeDirents(d)) {
       if (entry.name === "node_modules" || entry.name === ".git") continue;
       if (entry.isSymbolicLink()) continue;
       const full = path.join(d, entry.name);
