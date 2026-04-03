@@ -292,6 +292,10 @@ export interface ClawHubAnalysis {
   analyzedAt: string;
   staticAnalysis: StaticAnalysisResult;
   llmEval: LLMEvalResult | null;
+  /** Resolved catalog model id for `--llm` rows (persisted even when LLM fails or SKILL.md is missing). */
+  catalogLlmModel?: string | null;
+  /** With `--llm`: `ok` | `slow` | `timeout` | `llm_failed` | `no_skill_md` (SQLite `llm_outcome`). */
+  llmOutcome?: string | null;
   overallComposite: number;
   fileStats: {
     fileCount: number;

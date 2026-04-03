@@ -158,6 +158,12 @@ Unless **`--dry-run`**, sync writes **`clawhub/skills-metadata.json`** immediate
 
 **Analyze** (same section: **no slug** / **`--all`** / **`<slug>`**) — extracts to **`clawhub-skills/<slug>/`**, runs static checks + optional **`--llm`**. **`--cleanup`** deletes zip + extracted folder after each successful skill. Unless **`--no-seed`**, analyze **re-syncs the full seed list into SQLite** first (same upsert as crawl/download) so paths in the DB match disk—use **`--no-seed`** when you already crawled or downloaded recently and want to skip that pass.
 
+**Catalog paths** — Zips are under **`clawhub/zip/`** and extracts under **`clawhub-skills/<slug>/`**. Resolution: **`CLAWHUB_DIR`** (absolute path to the folder that contains **`zip/`**), else if **`CLAW_BENCH_DB`** is **`…/clawhub/bench.db`**, that **`clawhub`** directory, else **`./clawhub`** under the process cwd. The seed list is always **`./clawhub/skills-seed.json`** relative to **cwd** — run from the repo root (or **`cd`** there) so paths line up.
+
+**Skip / re-run** — Without **`--force`**, static-only runs skip slugs that already have **any** `clawhub_analysis` row. With **`--llm`**, slugs that already have a row for the **resolved** `llm_model` are skipped (including non-success outcomes, so failed/slow runs are not re-queued). **`--force`** re-runs in-scope slugs. **`--llm-exclude-slugs <csv>`** or **`CLAWHUB_LLM_EXCLUDE_SLUGS`** always excludes those slugs (even with **`--force`**).
+
+**LLM timeout / slow** — **`CLAWHUB_LLM_TIMEOUT_MS`** (default **`120000`**; **`0`** disables the HTTP timeout). **`CLAWHUB_LLM_SLOW_MS`** (default **`120000`**; **`0`** disables) sets **`llm_outcome=slow`** when the LLM phase wall time reaches the threshold. Stored values: **`ok`**, **`slow`**, **`timeout`**, **`llm_failed`**, **`no_skill_md`**. On DB open, legacy rows with both **`llm_model`** and **`llm_composite`** get **`llm_outcome = 'ok'`** if the column was missing.
+
 By default each run **appends** new rows to **`clawhub_analysis`**; it does **not** remove older results. Use **`--clean-all-analyses`** to wipe prior rows first: **full table** `DELETE` when the run covers the **entire** seed list (e.g. `analyze` with no slug, or any case where every seed is in scope); otherwise only **`DELETE` for the slugs** in that run (e.g. `analyze my-skill --clean-all-analyses`). Catalog rows in **`clawhub_skills`** and zips are unchanged. Use **`--clean-model-analyses`** (with `--llm`) to remove rows for only the current `llm_model`.
 
 ```bash
@@ -189,6 +195,7 @@ The same numbers are persisted on **each insert** into SQLite table **`clawhub_a
 | `extract_ms` | Unzip / prepare extracted folder |
 | `static_analysis_ms` | Static analyzers only |
 | `llm_ms` | LLM call when `--llm` (SQL `NULL` when not used) |
+| `llm_outcome` | With `--llm`: `ok` / `slow` / `timeout` / `llm_failed` / `no_skill_md` (SQL `NULL` for static-only rows) |
 | `file_stats_ms` | `collectFileStats` |
 | `pipeline_ms` | Entire `analyzeSkill()` run |
 
@@ -196,9 +203,9 @@ Database file: **`CLAW_BENCH_DB`** (default **`~/.claw-bench/bench.db`**). Exist
 
 **Re-run / backfill timing and scores** — Each `clawhub analyze` **inserts a new row**; nothing is updated in place unless you pass **`--clean-all-analyses`** or **`--clean-model-analyses`**. The catalog and dashboard use the **latest row per skill** (by `analyzed_at`), so older rows (including those with `NULL` timing columns from before timing existed) are **ignored** for display once a newer analysis exists.
 
-1. Run analyze again as usual, e.g. `npx claw-bench clawhub analyze --all --llm --no-seed` (keeps history; newest row wins).
+1. Run analyze again as usual, e.g. `npx claw-bench clawhub analyze --all --llm --no-seed` (keeps history; newest row wins). By default, slugs already analyzed (static or for the current LLM model) are **skipped** — see **Skip / re-run** above.
 2. To **drop old analysis rows before the run**, add **`--clean-all-analyses`** (or **`--clean-model-analyses`** for model-specific cleanup; requires `--llm`). After a full-table/model clean, **`--force`** is not required to re-run that model.
-3. If you use **`--llm`** **without** cleanup flags, add **`--force`** when you want to **append** another evaluation for skills that already have a row for the **same** LLM model.
+3. Use **`--force`** to **re-analyze** slugs that would otherwise be skipped (same model with `--llm`, or any prior static row without `--llm`).
 4. Manual SQL (backup first) still works if you prefer: `DELETE FROM clawhub_analysis;` or per-slug `DELETE FROM clawhub_analysis WHERE slug = 'my-skill';`
 
 `npx claw-bench clawhub status` — zips vs seed vs analyzed counts.
@@ -393,6 +400,11 @@ See **Skill metadata** under [ClawHub: crawl, download, analyze](#clawhub-crawl-
 | `BENCH_EMBED_MODEL` | Default embedding model | `nomic-embed-text` |
 | `OLLAMA_HOST` | Ollama server URL | `http://localhost:11434` |
 | `CLAW_BENCH_DB` | SQLite database path | `~/.claw-bench/bench.db` |
+| `CLAWHUB_DIR` | Absolute path to the `clawhub` folder (`zip/`, seed sibling layout); overrides DB-relative / cwd `./clawhub` | — |
+| `CLAWHUB_LLM_TIMEOUT_MS` | HTTP timeout per LLM request (`0` = none) | `120000` |
+| `CLAWHUB_LLM_SLOW_MS` | LLM phase ≥ this ms → `llm_outcome=slow` (`0` = off) | `120000` |
+| `CLAWHUB_LLM_EXCLUDE_SLUGS` | Comma-separated slugs excluded from `--llm` (same as `--llm-exclude-slugs`) | — |
+| `CLAW_BENCH_USE_SQLITE3_CLI` | `0`/`false` = always sql.js for prefetch; `1`/`true` = require `sqlite3` CLI (falls back with warning) | unset (try CLI, then sql.js) |
 | `CLAWHUB_API_KEY` | ClawHub leaderboard API key | — |
 | `CLAWHUB_API_URL` | ClawHub benchmark leaderboard `POST` URL | `https://api.clawhub.dev/v1/leaderboard` (legacy default; **override** if that host does not resolve) |
 | `CLAWHUB_CONVEX_URL` | Convex `.cloud` base URL for **`clawhub crawl`** and **`data sync-clawhub-metadata`** | `https://wry-manatee-359.convex.cloud` |

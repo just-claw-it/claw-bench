@@ -121,7 +121,7 @@ describe("store ClawHub analysis", () => {
     await storeClawHubAnalysis(baseAnalysis());
 
     const rows0 = await query<Record<string, unknown>>(
-      "SELECT extract_ms, static_analysis_ms, llm_ms, file_stats_ms, pipeline_ms, llm_model, analysis_insights FROM clawhub_analysis WHERE slug = ?",
+      "SELECT extract_ms, static_analysis_ms, llm_ms, file_stats_ms, pipeline_ms, llm_model, llm_outcome, analysis_insights FROM clawhub_analysis WHERE slug = ?",
       [entry.slug]
     );
     assert.equal(rows0.length, 1);
@@ -130,6 +130,7 @@ describe("store ClawHub analysis", () => {
     assert.equal(rows0[0].llm_ms, null);
     assert.equal(rows0[0].file_stats_ms, 2);
     assert.equal(rows0[0].pipeline_ms, 20);
+    assert.equal(rows0[0].llm_outcome, null);
     assert.equal(typeof rows0[0].analysis_insights, "string");
     const parsed0 = JSON.parse(String(rows0[0].analysis_insights)) as {
       credentialHygiene?: { hygieneLevel?: string };
@@ -168,6 +169,108 @@ describe("store ClawHub analysis", () => {
       [entry.slug]
     );
     assert.equal(rows1[0]?.llm_ms, 500);
+  });
+
+  it("hasClawHubLlmAnalysisForModel matches slug+llm_model even when llm_composite is null", async () => {
+    const {
+      upsertClawHubSkill,
+      storeClawHubAnalysis,
+      hasClawHubLlmAnalysisForModel,
+      getSlugsWithLlmCompositeForModel,
+    } = await import("../store.js");
+    const slug = "llm-row-null-composite";
+    const model = "m-null-composite";
+    const e: ClawHubSkillEntry = { ...entry, slug };
+    await upsertClawHubSkill(e, {});
+    const a = baseAnalysis({
+      slug,
+      llmEval: {
+        clarity: 0.5,
+        usefulness: 0.5,
+        safety: 0.5,
+        completeness: 0.5,
+        llmComposite: 0.5,
+        model,
+        reasoning: "x",
+      },
+    });
+    (a as { llmEval: { llmComposite: number | null } }).llmEval!.llmComposite = null;
+    await storeClawHubAnalysis(a as ClawHubAnalysis);
+    assert.equal(await hasClawHubLlmAnalysisForModel(slug, model), true);
+
+    const prevCli = process.env.CLAW_BENCH_USE_SQLITE3_CLI;
+    process.env.CLAW_BENCH_USE_SQLITE3_CLI = "0";
+    try {
+      const set = await getSlugsWithLlmCompositeForModel(model);
+      assert.ok(set.has(slug));
+    } finally {
+      if (prevCli === undefined) delete process.env.CLAW_BENCH_USE_SQLITE3_CLI;
+      else process.env.CLAW_BENCH_USE_SQLITE3_CLI = prevCli;
+    }
+  });
+
+  it("storeClawHubAnalysis writes catalogLlmModel when llmEval is null", async () => {
+    const { upsertClawHubSkill, storeClawHubAnalysis, query } = await import("../store.js");
+    const slug = "catalog-llm-model-only";
+    const e: ClawHubSkillEntry = { ...entry, slug };
+    await upsertClawHubSkill(e, {});
+    await storeClawHubAnalysis(
+      baseAnalysis({
+        slug,
+        catalogLlmModel: "test-model-for-storage",
+        llmEval: null,
+      })
+    );
+    const rows = await query<{ llm_model: string | null }>(
+      "SELECT llm_model FROM clawhub_analysis WHERE slug = ? ORDER BY id DESC LIMIT 1",
+      [slug]
+    );
+    assert.equal(rows[0]?.llm_model, "test-model-for-storage");
+  });
+
+  it("storeClawHubAnalysis persists llm_outcome", async () => {
+    const { upsertClawHubSkill, storeClawHubAnalysis, query } = await import("../store.js");
+    const slug = "llm-outcome-slow";
+    const e: ClawHubSkillEntry = { ...entry, slug };
+    await upsertClawHubSkill(e, {});
+    await storeClawHubAnalysis(
+      baseAnalysis({
+        slug,
+        catalogLlmModel: "m1",
+        llmOutcome: "slow",
+        llmEval: {
+          clarity: 0.5,
+          usefulness: 0.5,
+          safety: 0.5,
+          completeness: 0.5,
+          llmComposite: 0.5,
+          model: "m1",
+          reasoning: "x",
+        },
+      })
+    );
+    const rows = await query<{ llm_outcome: string | null }>(
+      "SELECT llm_outcome FROM clawhub_analysis WHERE slug = ? ORDER BY id DESC LIMIT 1",
+      [slug]
+    );
+    assert.equal(rows[0]?.llm_outcome, "slow");
+  });
+
+  it("getSlugsWithAnyClawHubAnalysis returns slugs with analysis rows", async () => {
+    const prevCli = process.env.CLAW_BENCH_USE_SQLITE3_CLI;
+    process.env.CLAW_BENCH_USE_SQLITE3_CLI = "0";
+    try {
+      const { upsertClawHubSkill, storeClawHubAnalysis, getSlugsWithAnyClawHubAnalysis } =
+        await import("../store.js");
+      const e: ClawHubSkillEntry = { ...entry, slug: "any-analysis-slug-test" };
+      await upsertClawHubSkill(e, {});
+      await storeClawHubAnalysis(baseAnalysis({ slug: e.slug }));
+      const s = await getSlugsWithAnyClawHubAnalysis();
+      assert.ok(s.has(e.slug));
+    } finally {
+      if (prevCli === undefined) delete process.env.CLAW_BENCH_USE_SQLITE3_CLI;
+      else process.env.CLAW_BENCH_USE_SQLITE3_CLI = prevCli;
+    }
   });
 });
 

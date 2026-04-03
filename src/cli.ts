@@ -781,8 +781,9 @@ clawhub
   .description("Download skill zip(s) from ClawHub")
   .option("--all", "Download all skills from seed list")
   .action(async (slug: string | undefined, opts) => {
-    const { loadSeedList, downloadSkill, downloadAll, seedSkillsToDB } = await import("./clawhub.js");
-    const clawhubDir = path.join(process.cwd(), "clawhub");
+    const { loadSeedList, downloadSkill, downloadAll, seedSkillsToDB, resolveClawhubDirs } =
+      await import("./clawhub.js");
+    const { clawhubDir } = resolveClawhubDirs();
 
     if (opts.all || !slug) {
       const seeds = loadSeedList(process.cwd());
@@ -831,7 +832,7 @@ clawhub
   )
   .option(
     "--force",
-    "With --llm, re-run LLM even if this slug already has analysis for the current model"
+    "Re-analyze even when SQLite already has results (static-only: any prior row; with --llm, re-run when a row exists for the current LLM model)"
   )
   .option(
     "--no-seed",
@@ -849,23 +850,34 @@ clawhub
     "--clean-model-analyses",
     "With --llm, delete prior clawhub_analysis rows for the current llm_model only (full model scope when run covers entire seed list; otherwise only matching slugs)."
   )
+  .option(
+    "--llm-exclude-slugs <csv>",
+    "With --llm, never analyze these slugs (comma-separated). Same as env CLAWHUB_LLM_EXCLUDE_SLUGS. Applies even with --force."
+  )
   .action(async (slug: string | undefined, opts) => {
-    const { loadSeedList, extractSkill, findExistingZip, seedSkillsToDB } = await import("./clawhub.js");
+    const { loadSeedList, extractSkill, findExistingZip, seedSkillsToDB, resolveClawhubDirs } =
+      await import("./clawhub.js");
     const { analyzeSkill, resolvedCatalogLlmModel } = await import("./clawhub-analyzer.js");
     const {
       storeClawHubAnalysis,
       upsertClawHubSkill,
-      hasClawHubLlmAnalysisForModel,
+      dbPath,
+      getSlugsWithLlmCompositeForModel,
+      getSlugsWithAnyClawHubAnalysis,
       deleteAllClawHubAnalysis,
       deleteClawHubAnalysisForSlugs,
       deleteAllClawHubAnalysisForModel,
       deleteClawHubAnalysisForSlugsAndModel,
     } = await import("./store.js");
 
-    const clawhubDir = path.join(process.cwd(), "clawhub");
-    const skillsDir = path.join(process.cwd(), "clawhub-skills");
+    function parseCommaSeparatedSlugs(csv: string | undefined): Set<string> {
+      if (!csv || typeof csv !== "string") return new Set();
+      const parts = csv.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+      return new Set(parts);
+    }
+
+    const { clawhubDir, skillsDir } = resolveClawhubDirs();
     const seeds = loadSeedList(process.cwd());
-    // Commander: `--no-seed` → option attribute `seed` (default true); `--no-seed` sets `seed` to false — not `noSeed`.
     if (opts.seed !== false) {
       await seedSkillsToDB(process.cwd());
     } else {
@@ -933,6 +945,40 @@ clawhub
     let failed = 0;
     const total = toAnalyze.length;
 
+    let staticAlreadyDone = new Set<string>();
+    if (!opts.llm && !opts.force) {
+      console.log(
+        "  Loading slugs with prior static analysis from SQLite (tries `sqlite3` CLI first, then sql.js)…"
+      );
+      console.log(`  Database: ${dbPath()}\n`);
+      staticAlreadyDone = await getSlugsWithAnyClawHubAnalysis();
+      console.log(
+        `  ${staticAlreadyDone.size} slug(s) will skip re-analysis; use --force to re-run static analysis.\n`
+      );
+    }
+
+    let llmAlreadyDone = new Set<string>();
+    if (opts.llm && !opts.force) {
+      console.log(
+        "  Loading slugs that already have a clawhub_analysis row for this LLM model from SQLite (tries `sqlite3` CLI first, then sql.js)…"
+      );
+      console.log(`  Database: ${dbPath()}\n`);
+      llmAlreadyDone = await getSlugsWithLlmCompositeForModel(llmModel);
+      console.log(
+        `  ${llmAlreadyDone.size} slug(s) will skip (--llm); use --force to re-analyze them.\n`
+      );
+    }
+
+    const llmExcluded = new Set<string>([
+      ...parseCommaSeparatedSlugs(process.env.CLAWHUB_LLM_EXCLUDE_SLUGS),
+      ...parseCommaSeparatedSlugs(opts.llmExcludeSlugs as string | undefined),
+    ]);
+    if (opts.llm && llmExcluded.size > 0) {
+      console.log(
+        `  ${llmExcluded.size} slug(s) LLM-excluded (--llm-exclude-slugs / CLAWHUB_LLM_EXCLUDE_SLUGS); they will be skipped even with --force.\n`
+      );
+    }
+
     for (let i = 0; i < toAnalyze.length; i++) {
       const entry = toAnalyze[i];
       const k = i + 1;
@@ -940,17 +986,35 @@ clawhub
 
       const zipPath = findExistingZip(entry.slug, clawhubDir);
       if (!zipPath) {
-        console.log(`  ${prog} ${entry.slug} — no zip found, skipping`);
+        const zipFolder = path.join(clawhubDir, "zip");
+        const orphanExtract = path.join(skillsDir, entry.slug);
+        if (fs.existsSync(orphanExtract)) {
+          console.log(
+            `  ${prog} ${entry.slug} — no zip under ${zipFolder}, skipping (stale extract: ${orphanExtract})`
+          );
+        } else {
+          console.log(`  ${prog} ${entry.slug} — no zip under ${zipFolder}, skipping`);
+        }
         continue;
       }
 
-      if (
-        opts.llm &&
-        !opts.force &&
-        (await hasClawHubLlmAnalysisForModel(entry.slug, llmModel))
-      ) {
+      if (opts.llm && llmExcluded.has(entry.slug)) {
         console.log(
-          `  ${prog} ${entry.slug} — already analyzed with LLM model "${llmModel}", skipping (use --force to re-run)`
+          `  ${prog} ${entry.slug} — LLM-excluded (skip list), skipping`
+        );
+        continue;
+      }
+
+      if (!opts.llm && !opts.force && staticAlreadyDone.has(entry.slug)) {
+        console.log(
+          `  ${prog} ${entry.slug} — already has static analysis in DB, skipping (use --force to re-run)`
+        );
+        continue;
+      }
+
+      if (opts.llm && !opts.force && llmAlreadyDone.has(entry.slug)) {
+        console.log(
+          `  ${prog} ${entry.slug} — already has analysis row for LLM model "${llmModel}", skipping (use --force to re-run)`
         );
         continue;
       }
@@ -1028,6 +1092,9 @@ clawhub
           }
         }
         console.log(`    ${prog} overall: ${pct(result.overallComposite)}`);
+        if (opts.llm && result.llmOutcome && result.llmOutcome !== "ok") {
+          console.log(`    ${prog} llm_outcome: ${result.llmOutcome}`);
+        }
 
         if (opts.cleanup) {
           try {
@@ -1068,11 +1135,11 @@ clawhub
   .command("status")
   .description("Summary of downloaded and analyzed skills")
   .action(async () => {
-    const { loadSeedList, findExistingZip } = await import("./clawhub.js");
+    const { loadSeedList, findExistingZip, resolveClawhubDirs } = await import("./clawhub.js");
     const { getClawHubCatalogStats } = await import("./store.js");
 
     const seeds = loadSeedList(process.cwd());
-    const clawhubDir = path.join(process.cwd(), "clawhub");
+    const { clawhubDir } = resolveClawhubDirs();
     let downloaded = 0;
     for (const s of seeds) {
       if (findExistingZip(s.slug, clawhubDir)) downloaded++;

@@ -20,6 +20,33 @@ const CONCURRENCY = Math.max(
 );
 const ZIP_SUBDIR = "zip";
 
+/**
+ * Resolves `clawhub` (zips under `zip/`) and sibling `clawhub-skills/` for extracts.
+ * Order: `CLAWHUB_DIR` → else parent of `CLAW_BENCH_DB` if basename is `clawhub` → else `./clawhub` under cwd.
+ */
+export function resolveClawhubDirs(): { clawhubDir: string; skillsDir: string } {
+  if (process.env.CLAWHUB_DIR) {
+    const clawhubDir = path.resolve(process.env.CLAWHUB_DIR);
+    return {
+      clawhubDir,
+      skillsDir: path.join(path.dirname(clawhubDir), "clawhub-skills"),
+    };
+  }
+  const fp = dbPath();
+  const dbDir = path.dirname(fp);
+  if (path.basename(dbDir) === "clawhub") {
+    const projectRoot = path.dirname(dbDir);
+    return {
+      clawhubDir: dbDir,
+      skillsDir: path.join(projectRoot, "clawhub-skills"),
+    };
+  }
+  return {
+    clawhubDir: path.join(process.cwd(), "clawhub"),
+    skillsDir: path.join(process.cwd(), "clawhub-skills"),
+  };
+}
+
 /** Parse Retry-After (delay-seconds or HTTP-date). Returns ms to wait, or null if absent/invalid. */
 function parseRetryAfterMs(res: Response): number | null {
   const raw = res.headers.get("retry-after");

@@ -145,6 +145,7 @@ describe("dashboard catalog API contract", () => {
     assert.equal(detail.llm_ms, null);
     assert.equal(detail.file_stats_ms, 3);
     assert.equal(detail.pipeline_ms, 25);
+    assert.equal(detail.llm_outcome, null);
     assert.equal(typeof detail.analysis_insights, "string");
     const ins = JSON.parse(String(detail.analysis_insights)) as { complexity?: string };
     assert.equal(ins.complexity, "simple");

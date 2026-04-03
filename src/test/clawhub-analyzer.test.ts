@@ -14,8 +14,19 @@ import {
   analyzeCodeQuality,
   computeStaticComposite,
   analyzeSkill,
+  finalizeLlmOutcome,
 } from "../clawhub-analyzer.js";
-import type { ClawHubSkillEntry, StaticAnalysisResult } from "../types.js";
+import type { ClawHubSkillEntry, LLMEvalResult, StaticAnalysisResult } from "../types.js";
+
+const stubLlmEval: LLMEvalResult = {
+  clarity: 1,
+  usefulness: 1,
+  safety: 1,
+  completeness: 1,
+  llmComposite: 1,
+  model: "m",
+  reasoning: "x",
+};
 
 function approxEq(a: number, b: number, eps = 1e-9): boolean {
   return Math.abs(a - b) < eps;
@@ -276,6 +287,22 @@ const b = process.env.STRIPE_SECRET;
   });
 });
 
+describe("finalizeLlmOutcome", () => {
+  it("marks slow when llm_ms exceeds CLAWHUB_LLM_SLOW_MS", () => {
+    const prev = process.env.CLAWHUB_LLM_SLOW_MS;
+    process.env.CLAWHUB_LLM_SLOW_MS = "1000";
+    try {
+      assert.equal(finalizeLlmOutcome("ok", stubLlmEval, 2000), "slow");
+      assert.equal(finalizeLlmOutcome("ok", stubLlmEval, 500), "ok");
+      assert.equal(finalizeLlmOutcome("timeout", null, 0), "timeout");
+      assert.equal(finalizeLlmOutcome("failed", null, 100), "llm_failed");
+    } finally {
+      if (prev === undefined) delete process.env.CLAWHUB_LLM_SLOW_MS;
+      else process.env.CLAWHUB_LLM_SLOW_MS = prev;
+    }
+  });
+});
+
 describe("analyzeSkill with llm flag but missing SKILL.md", () => {
   it("keeps llmEval null and llmMs measured", async () => {
     const dir = tmpSkillDir({
@@ -289,6 +316,8 @@ describe("analyzeSkill with llm flag but missing SKILL.md", () => {
     });
     const out = await analyzeSkill(dir, "fixture-skill", minimalEntry, { llm: true });
     assert.equal(out.llmEval, null);
+    assert.equal(out.llmOutcome, "no_skill_md");
+    assert.ok(typeof out.catalogLlmModel === "string" && out.catalogLlmModel.length > 0);
     assert.ok(out.timing.llmMs !== null);
     assert.ok(out.insights?.credentialHygiene);
     fs.rmSync(dir, { recursive: true });

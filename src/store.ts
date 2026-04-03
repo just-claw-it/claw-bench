@@ -16,6 +16,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { spawnSync } from "node:child_process";
 import initSqlJs, { type Database, type SqlJsStatic } from "sql.js";
 import { BenchmarkReport, SkillMetadata, ClawHubSkillEntry, ClawHubAnalysis } from "./types.js";
 import {
@@ -154,6 +155,7 @@ CREATE TABLE IF NOT EXISTS clawhub_analysis (
   file_stats_ms        INTEGER,
   pipeline_ms          INTEGER,
   analysis_insights    TEXT,
+  llm_outcome          TEXT,
   FOREIGN KEY (slug) REFERENCES clawhub_skills(slug)
 );
 
@@ -166,6 +168,8 @@ CREATE INDEX IF NOT EXISTS idx_version_history_skill ON version_history(skill_na
 CREATE INDEX IF NOT EXISTS idx_deps_skill            ON skill_dependencies(skill_name);
 CREATE INDEX IF NOT EXISTS idx_deps_depends_on       ON skill_dependencies(depends_on);
 CREATE INDEX IF NOT EXISTS idx_clawhub_analysis_slug ON clawhub_analysis(slug);
+CREATE INDEX IF NOT EXISTS idx_clawhub_analysis_llm_slug
+  ON clawhub_analysis(llm_model, slug) WHERE llm_composite IS NOT NULL;
 `;
 
 // ── Migration (idempotent) ─────────────────────────────────────────────────
@@ -198,12 +202,31 @@ function ensureClawhubAnalysisTimingColumns(db: Database): void {
   add("analysis_insights");
 }
 
+function ensureClawhubAnalysisLlmOutcomeColumn(db: Database): void {
+  if (!clawhubAnalysisColumnNames(db).has("slug")) return;
+  const cols = clawhubAnalysisColumnNames(db);
+  if (!cols.has("llm_outcome")) {
+    db.run(`ALTER TABLE clawhub_analysis ADD COLUMN llm_outcome TEXT`);
+  }
+}
+
+/** Sets `llm_outcome = 'ok'` for legacy rows that already had model + composite. */
+function backfillClawhubAnalysisLlmOutcomeOk(db: Database): void {
+  if (!clawhubAnalysisColumnNames(db).has("llm_outcome")) return;
+  db.run(
+    `UPDATE clawhub_analysis SET llm_outcome = 'ok'
+     WHERE llm_outcome IS NULL AND llm_model IS NOT NULL AND llm_composite IS NOT NULL`
+  );
+}
+
 function migrate(db: Database): void {
   // Drop old install_counts table if it exists from a previous schema version
   db.run(`DROP TABLE IF EXISTS install_counts`);
   // `run()` only executes a single statement; `exec()` applies the full schema.
   db.exec(SCHEMA);
   ensureClawhubAnalysisTimingColumns(db);
+  ensureClawhubAnalysisLlmOutcomeColumn(db);
+  backfillClawhubAnalysisLlmOutcomeOk(db);
 }
 
 /** Stale -wal / -shm from legacy WAL mode break sql.js opens — safe to remove for this app. */
@@ -781,18 +804,157 @@ export function upsertClawHubSkillsBatch(
   });
 }
 
-/** True if we already stored a successful LLM composite for this slug + model (skips redundant `--llm` runs). */
+/** True if we already stored an analysis row for this slug with this `llm_model` (skips redundant `--llm` runs). */
 export async function hasClawHubLlmAnalysisForModel(
   slug: string,
   llmModel: string
 ): Promise<boolean> {
   const rows = await query<{ n: number }>(
     `SELECT 1 AS n FROM clawhub_analysis
-     WHERE slug = ? AND llm_model = ? AND llm_composite IS NOT NULL
+     WHERE slug = ? AND llm_model = ?
      LIMIT 1`,
     [slug, llmModel]
   );
   return rows.length > 0;
+}
+
+function sqlStringLiteralForCli(s: string): string {
+  return `'${s.replace(/'/g, "''")}'`;
+}
+
+/**
+ * Read-only slug list without loading the DB into sql.js (fast on huge bench.db / NFS).
+ * Returns null if `sqlite3` is missing or the command fails.
+ */
+function slugsWithAnyAnalysisViaSqlite3Cli(fp: string): Set<string> | null {
+  try {
+    const sql = `SELECT DISTINCT slug FROM clawhub_analysis;`;
+    const r = spawnSync("sqlite3", [fp, "-batch", "-noheader", sql], {
+      encoding: "utf-8",
+      maxBuffer: 128 * 1024 * 1024,
+      windowsHide: true,
+    });
+    if (r.error) return null;
+    if (r.status !== 0) return null;
+    const lines = (r.stdout ?? "")
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    return new Set(lines);
+  } catch {
+    return null;
+  }
+}
+
+function slugsWithLlmCompositeViaSqlite3Cli(fp: string, llmModel: string): Set<string> | null {
+  try {
+    const sql = `SELECT DISTINCT slug FROM clawhub_analysis WHERE llm_model = ${sqlStringLiteralForCli(
+      llmModel
+    )};`;
+    const r = spawnSync("sqlite3", [fp, "-batch", "-noheader", sql], {
+      encoding: "utf-8",
+      maxBuffer: 128 * 1024 * 1024,
+      windowsHide: true,
+    });
+    if (r.error) return null;
+    if (r.status !== 0) return null;
+    const lines = (r.stdout ?? "")
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    return new Set(lines);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One DB round-trip: slugs that already have at least one `clawhub_analysis` row for this `llm_model`.
+ * Prefer this over calling {@link hasClawHubLlmAnalysisForModel} per slug (each call reloads the whole DB with sql.js).
+ *
+ * **Prefetch strategy:** Unless `CLAW_BENCH_USE_SQLITE3_CLI=0`, tries the **`sqlite3` shell** on PATH first (fast on
+ * NFS — no full-file load into Node). Falls back to sql.js `query()` if the CLI is missing or errors.
+ * Set `CLAW_BENCH_USE_SQLITE3_CLI=0` to always use sql.js.
+ */
+export async function getSlugsWithLlmCompositeForModel(llmModel: string): Promise<Set<string>> {
+  const fp = dbPath();
+  if (!fs.existsSync(fp)) return new Set();
+
+  const forceSqlJs =
+    process.env.CLAW_BENCH_USE_SQLITE3_CLI === "0" ||
+    process.env.CLAW_BENCH_USE_SQLITE3_CLI === "false";
+  const requireCli =
+    process.env.CLAW_BENCH_USE_SQLITE3_CLI === "1" ||
+    process.env.CLAW_BENCH_USE_SQLITE3_CLI === "true";
+
+  if (!forceSqlJs) {
+    const via = slugsWithLlmCompositeViaSqlite3Cli(fp, llmModel);
+    if (via !== null) {
+      return via;
+    }
+    if (requireCli) {
+      console.warn(
+        "[claw-bench] CLAW_BENCH_USE_SQLITE3_CLI=1 but `sqlite3` failed; falling back to sql.js."
+      );
+    } else {
+      let sizeHint = "";
+      try {
+        sizeHint = ` (${(fs.statSync(fp).size / (1024 * 1024)).toFixed(0)} MiB)`;
+      } catch {
+        /* ignore */
+      }
+      console.warn(
+        `[claw-bench] LLM prefetch: no working \`sqlite3\` on PATH${sizeHint}; using sql.js (full read — slow on Lustre/NFS). ` +
+          "Add sqlite3 to PATH (e.g. `module load sqlite`) or expect a long pause here."
+      );
+    }
+  }
+
+  const rows = await query<{ slug: string }>(
+    `SELECT DISTINCT slug FROM clawhub_analysis
+     WHERE llm_model = ?`,
+    [llmModel]
+  );
+  return new Set(rows.map((r) => r.slug));
+}
+
+/** Distinct slugs with any `clawhub_analysis` row (static skip). Same sqlite3/sql.js strategy as LLM prefetch. */
+export async function getSlugsWithAnyClawHubAnalysis(): Promise<Set<string>> {
+  const fp = dbPath();
+  if (!fs.existsSync(fp)) return new Set();
+
+  const forceSqlJs =
+    process.env.CLAW_BENCH_USE_SQLITE3_CLI === "0" ||
+    process.env.CLAW_BENCH_USE_SQLITE3_CLI === "false";
+  const requireCli =
+    process.env.CLAW_BENCH_USE_SQLITE3_CLI === "1" ||
+    process.env.CLAW_BENCH_USE_SQLITE3_CLI === "true";
+
+  if (!forceSqlJs) {
+    const via = slugsWithAnyAnalysisViaSqlite3Cli(fp);
+    if (via !== null) {
+      return via;
+    }
+    if (requireCli) {
+      console.warn(
+        "[claw-bench] CLAW_BENCH_USE_SQLITE3_CLI=1 but `sqlite3` failed; falling back to sql.js."
+      );
+    } else {
+      let sizeHint = "";
+      try {
+        sizeHint = ` (${(fs.statSync(fp).size / (1024 * 1024)).toFixed(0)} MiB)`;
+      } catch {
+        /* ignore */
+      }
+      console.warn(
+        `[claw-bench] Analysis prefetch: no working \`sqlite3\` on PATH${sizeHint}; using sql.js (full read — slow on Lustre/NFS). ` +
+          "Add sqlite3 to PATH (e.g. `module load sqlite`) or expect a long pause here."
+      );
+    }
+  }
+
+  const rows = await query<{ slug: string }>(`SELECT DISTINCT slug FROM clawhub_analysis`, []);
+  return new Set(rows.map((r) => r.slug));
 }
 
 /** Remove every row in `clawhub_analysis` (full catalog re-analyze). */
@@ -874,7 +1036,9 @@ export function storeClawHubAnalysis(analysis: ClawHubAnalysis): Promise<number>
     const s = analysis.staticAnalysis;
     const l = analysis.llmEval;
     const tm = analysis.timing;
+    const llmModelStored = l?.model ?? analysis.catalogLlmModel ?? null;
     const insightsJson = analysis.insights ? JSON.stringify(analysis.insights) : null;
+    const llmOutcomeStored = analysis.llmOutcome ?? null;
 
     db.run(
       `INSERT INTO clawhub_analysis (
@@ -883,8 +1047,9 @@ export function storeClawHubAnalysis(analysis: ClawHubAnalysis): Promise<number>
         llm_clarity, llm_usefulness, llm_safety, llm_completeness, llm_composite,
         llm_model, llm_reasoning, overall_composite,
         extract_ms, static_analysis_ms, llm_ms, file_stats_ms, pipeline_ms,
-        analysis_insights
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        analysis_insights,
+        llm_outcome
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         analysis.slug,
         analysis.analyzedAt,
@@ -899,7 +1064,7 @@ export function storeClawHubAnalysis(analysis: ClawHubAnalysis): Promise<number>
         l?.safety ?? null,
         l?.completeness ?? null,
         l?.llmComposite ?? null,
-        l?.model ?? null,
+        llmModelStored,
         l?.reasoning ?? null,
         analysis.overallComposite,
         tm.extractMs,
@@ -908,6 +1073,7 @@ export function storeClawHubAnalysis(analysis: ClawHubAnalysis): Promise<number>
         tm.fileStatsMs,
         tm.pipelineMs,
         insightsJson,
+        llmOutcomeStored,
       ]
     );
 
@@ -977,7 +1143,8 @@ function clawhubCatalogSelectSql(): string {
        (SELECT MAX(ca.analyzed_at) FROM clawhub_analysis ca WHERE ca.slug = s.slug) AS analyzed_at,
        CASE WHEN latest.id IS NOT NULL THEN 1 ELSE 0 END AS analyzed,
        latest.extract_ms, latest.static_analysis_ms, latest.llm_ms, latest.file_stats_ms,
-       latest.pipeline_ms`;
+       latest.pipeline_ms,
+       latest.llm_outcome AS llm_outcome`;
 }
 
 export interface ClawHubCatalogPageOpts {
@@ -1092,6 +1259,7 @@ export async function getClawHubSkillDetail(slug: string): Promise<Record<string
        detail.llm_models_json,
        latest.llm_model AS llm_model,
        latest.llm_reasoning AS llm_reasoning,
+       latest.llm_outcome AS llm_outcome,
        (${overall}) AS overall_composite,
        (SELECT MAX(ca.analyzed_at) FROM clawhub_analysis ca WHERE ca.slug = s.slug) AS analyzed_at,
        CASE WHEN latest.id IS NOT NULL THEN 1 ELSE 0 END AS analyzed,

@@ -19,6 +19,79 @@ import {
 import { collectFileStats, readdirSafeDirents, readdirSafeNames } from "./clawhub.js";
 import { computeOverallComposite } from "./clawhub-scoring.js";
 
+const DEFAULT_CLAWHUB_LLM_TIMEOUT_MS = 120_000;
+
+/** Milliseconds for LLM HTTP timeout; `0` disables. Default 120000. */
+export function readClawhubLlmTimeoutMs(): number {
+  const raw = process.env.CLAWHUB_LLM_TIMEOUT_MS;
+  if (raw === undefined || raw === "") return DEFAULT_CLAWHUB_LLM_TIMEOUT_MS;
+  const n = parseInt(String(raw).trim(), 10);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_CLAWHUB_LLM_TIMEOUT_MS;
+  return n;
+}
+
+const DEFAULT_CLAWHUB_LLM_SLOW_MS = 120_000;
+
+/** If LLM phase ≥ this ms, `llm_outcome=slow`. Default 120000; `0` disables slow marking. */
+export function readClawhubLlmSlowMs(): number {
+  const raw = process.env.CLAWHUB_LLM_SLOW_MS;
+  if (raw === undefined || raw === "") return DEFAULT_CLAWHUB_LLM_SLOW_MS;
+  const n = parseInt(String(raw).trim(), 10);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_CLAWHUB_LLM_SLOW_MS;
+  return n;
+}
+
+/** HTTP outcome of one LLM provider call (before slow-vs-ok timing). */
+export type LlmEvaluateKind = "ok" | "timeout" | "failed";
+
+export interface LlmEvaluateResult {
+  eval: LLMEvalResult | null;
+  kind: LlmEvaluateKind;
+}
+
+type LlmHttpResult =
+  | { ok: true; res: Response }
+  | { ok: false; reason: "timeout" }
+  | { ok: false; reason: "fetch_error" };
+
+async function fetchWithLlmTimeout(
+  url: string,
+  init: RequestInit,
+  slug: string,
+  providerLabel: string
+): Promise<LlmHttpResult> {
+  const timeoutMs = readClawhubLlmTimeoutMs();
+  if (timeoutMs <= 0) {
+    try {
+      const res = await fetch(url, init);
+      return { ok: true, res };
+    } catch (e) {
+      console.warn(
+        `  LLM fetch failed for ${slug} (${providerLabel}): ${e instanceof Error ? e.message : String(e)}`
+      );
+      return { ok: false, reason: "fetch_error" };
+    }
+  }
+
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...init, signal: ac.signal });
+    return { ok: true, res };
+  } catch (e) {
+    if ((e as { name?: string }).name === "AbortError") {
+      console.warn(
+        `  LLM request timed out for ${slug} (${providerLabel}) after ${timeoutMs}ms — ` +
+          "increase CLAWHUB_LLM_TIMEOUT_MS if the model is slow, or check Ollama/API health"
+      );
+      return { ok: false, reason: "timeout" };
+    }
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 // ── YAML frontmatter parsing ───────────────────────────────────────────────
 
 interface SkillFrontmatter {
@@ -701,7 +774,7 @@ function parseLlmJsonResponse(text: string, slug: string, model: string): LLMEva
     return null;
   }
 
-  const parsed = JSON.parse(jsonMatch[0]) as {
+  let parsed: {
     clarity: number;
     usefulness: number;
     safety: number;
@@ -715,6 +788,12 @@ function parseLlmJsonResponse(text: string, slug: string, model: string): LLMEva
       notes?: string;
     };
   };
+  try {
+    parsed = JSON.parse(jsonMatch[0]) as typeof parsed;
+  } catch {
+    console.warn(`  LLM evaluation JSON parse failed for ${slug}`);
+    return null;
+  }
 
   const clamp = (v: number) => Math.max(0, Math.min(1, v));
   const c = clamp(parsed.clarity);
@@ -747,108 +826,141 @@ function parseLlmJsonResponse(text: string, slug: string, model: string): LLMEva
 async function llmEvaluateAnthropic(
   prompt: string,
   slug: string
-): Promise<LLMEvalResult | null> {
+): Promise<LlmEvaluateResult> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return null;
+  if (!apiKey) return { eval: null, kind: "failed" };
 
   const model = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-20250514";
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
+  const fr = await fetchWithLlmTimeout(
+    "https://api.anthropic.com/v1/messages",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 500,
+        messages: [{ role: "user", content: prompt }],
+      }),
     },
-    body: JSON.stringify({
-      model,
-      max_tokens: 500,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
+    slug,
+    "Anthropic"
+  );
 
+  if (!fr.ok && fr.reason === "timeout") return { eval: null, kind: "timeout" };
+  if (!fr.ok) return { eval: null, kind: "failed" };
+
+  const res = fr.res;
   if (!res.ok) {
     console.warn(`  LLM evaluation failed for ${slug}: HTTP ${res.status}`);
-    return null;
+    return { eval: null, kind: "failed" };
   }
 
   const json = await res.json() as {
     content: Array<{ type: string; text: string }>;
   };
   const text = json.content?.[0]?.text ?? "";
-  return parseLlmJsonResponse(text, slug, model);
+  const evalResult = parseLlmJsonResponse(text, slug, model);
+  if (!evalResult) return { eval: null, kind: "failed" };
+  return { eval: evalResult, kind: "ok" };
 }
 
 /** Ollama: same host as embeddings (`OLLAMA_HOST`), model from `OLLAMA_ANALYSIS_MODEL` or `OLLAMA_MODEL`. */
-async function llmEvaluateOllama(prompt: string, slug: string): Promise<LLMEvalResult | null> {
+async function llmEvaluateOllama(prompt: string, slug: string): Promise<LlmEvaluateResult> {
   const host = (process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434").replace(/\/$/, "");
   const model =
     process.env.OLLAMA_ANALYSIS_MODEL ?? process.env.OLLAMA_MODEL ?? "llama3.2";
 
-  const res = await fetch(`${host}/api/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: "user", content: prompt }],
-      stream: false,
-    }),
-  });
+  const fr = await fetchWithLlmTimeout(
+    `${host}/api/chat`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content: prompt }],
+        stream: false,
+      }),
+    },
+    slug,
+    "Ollama"
+  );
 
+  if (!fr.ok && fr.reason === "timeout") return { eval: null, kind: "timeout" };
+  if (!fr.ok) return { eval: null, kind: "failed" };
+
+  const res = fr.res;
   if (!res.ok) {
     console.warn(`  Ollama LLM failed for ${slug}: HTTP ${res.status}`);
-    return null;
+    return { eval: null, kind: "failed" };
   }
 
   const data = (await res.json()) as { message?: { content?: string } };
   const text = data.message?.content ?? "";
-  return parseLlmJsonResponse(text, slug, model);
+  const evalResult = parseLlmJsonResponse(text, slug, model);
+  if (!evalResult) return { eval: null, kind: "failed" };
+  return { eval: evalResult, kind: "ok" };
 }
 
 /** OpenAI-compatible `POST /v1/chat/completions` (OpenAI, LM Studio, vLLM, etc.). */
 async function llmEvaluateOpenAICompatible(
   prompt: string,
   slug: string
-): Promise<LLMEvalResult | null> {
+): Promise<LlmEvaluateResult> {
   const base = (process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, "");
   const apiKey = process.env.OPENAI_API_KEY ?? "";
   const model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 
   if (!apiKey) {
     console.warn(`  OPENAI_API_KEY not set for ${slug}`);
-    return null;
+    return { eval: null, kind: "failed" };
   }
 
-  const res = await fetch(`${base}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+  const fr = await fetchWithLlmTimeout(
+    `${base}/chat/completions`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 500,
+        messages: [{ role: "user", content: prompt }],
+      }),
     },
-    body: JSON.stringify({
-      model,
-      max_tokens: 500,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
+    slug,
+    "OpenAI-compatible"
+  );
 
+  if (!fr.ok && fr.reason === "timeout") return { eval: null, kind: "timeout" };
+  if (!fr.ok) return { eval: null, kind: "failed" };
+
+  const res = fr.res;
   if (!res.ok) {
     console.warn(`  OpenAI-compatible LLM failed for ${slug}: HTTP ${res.status}`);
-    return null;
+    return { eval: null, kind: "failed" };
   }
 
   const data = (await res.json()) as {
     choices?: Array<{ message?: { content?: string } }>;
   };
   const text = data.choices?.[0]?.message?.content ?? "";
-  return parseLlmJsonResponse(text, slug, model);
+  const evalResult = parseLlmJsonResponse(text, slug, model);
+  if (!evalResult) return { eval: null, kind: "failed" };
+  return { eval: evalResult, kind: "ok" };
 }
 
 export async function llmEvaluate(
   skillMdContent: string,
   slug: string,
   sourceContext = ""
-): Promise<LLMEvalResult | null> {
+): Promise<LlmEvaluateResult> {
   const prompt = buildLlmPrompt(skillMdContent, slug, sourceContext);
 
   try {
@@ -862,7 +974,7 @@ export async function llmEvaluate(
     return await llmEvaluateAnthropic(prompt, slug);
   } catch (err) {
     console.warn(`  LLM evaluation error for ${slug}: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
+    return { eval: null, kind: "failed" };
   }
 }
 
@@ -870,6 +982,19 @@ export async function llmEvaluate(
 
 function msSince(t0: number): number {
   return Math.round(performance.now() - t0);
+}
+
+/** Stored in `clawhub_analysis.llm_outcome` when `--llm` is used. */
+export function finalizeLlmOutcome(
+  kind: LlmEvaluateKind,
+  llmEval: LLMEvalResult | null,
+  llmMs: number
+): string {
+  if (kind === "timeout") return "timeout";
+  if (kind === "failed" || !llmEval) return "llm_failed";
+  const slowMs = readClawhubLlmSlowMs();
+  if (slowMs > 0 && llmMs >= slowMs) return "slow";
+  return "ok";
 }
 
 export async function analyzeSkill(
@@ -901,21 +1026,40 @@ export async function analyzeSkill(
   const tFs0 = performance.now();
   const fileStats = collectFileStats(skillDir);
   const fileStatsMs = msSince(tFs0);
+  if (options.llm && fileStats.fileCount >= 400) {
+    console.log(
+      `    ${slug}: ${fileStats.fileCount} files — static + source scan may take several minutes before LLM…`
+    );
+  }
   const insights = sourceInsights(skillDir);
 
   let llmEval: LLMEvalResult | null = null;
   let llmMs: number | null = null;
+  let llmOutcome: string | null = null;
   if (options.llm) {
     const tLlm0 = performance.now();
     const skillMdPath = path.join(skillDir, "SKILL.md");
     if (fs.existsSync(skillMdPath)) {
+      const tOut = readClawhubLlmTimeoutMs();
+      if (tOut > 0) {
+        console.log(
+          `    ${slug}: calling LLM (${llmProvider()}, timeout ${Math.round(tOut / 1000)}s)…`
+        );
+      } else {
+        console.log(`    ${slug}: calling LLM (${llmProvider()}, no HTTP timeout)…`);
+      }
       const skillMdContent = fs.readFileSync(skillMdPath, "utf-8");
-      llmEval = await llmEvaluate(skillMdContent, slug, sourceSummaryForLlm(insights));
+      const llmRes = await llmEvaluate(skillMdContent, slug, sourceSummaryForLlm(insights));
+      llmEval = llmRes.eval;
       if (llmEval?.sourceAudit) {
         insights.llmAssistedAudit = llmEval.sourceAudit;
       }
+      llmMs = msSince(tLlm0);
+      llmOutcome = finalizeLlmOutcome(llmRes.kind, llmEval, llmMs);
+    } else {
+      llmMs = msSince(tLlm0);
+      llmOutcome = "no_skill_md";
     }
-    llmMs = msSince(tLlm0);
   }
 
   const pipelineMs = msSince(pipelineT0);
@@ -931,6 +1075,7 @@ export async function analyzeSkill(
     analyzedAt: new Date().toISOString(),
     staticAnalysis,
     llmEval,
+    ...(options.llm ? { catalogLlmModel: resolvedCatalogLlmModel(), llmOutcome } : {}),
     overallComposite,
     fileStats,
     insights,
