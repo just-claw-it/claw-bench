@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
-import { useCatalog, useCatalogStats } from "../api";
+import { useQueryClient } from "@tanstack/react-query";
+import { useCatalog, useCatalogStats, prefetchCatalogNeighbors } from "../api";
 import { type CatalogSkill, pct, scoreColor } from "../types";
 import ScoreBar from "../components/ScoreBar";
 import { LlmBreakdownInline, parseLlmModelsJson } from "../components/LlmMultiModelHint";
@@ -28,20 +29,46 @@ export default function Catalog() {
     setPage(1);
   }, [debouncedQ, sortKey, filterAnalyzed, filterScripts, pageSize]);
 
-  const { data: catalogStats } = useCatalogStats();
-  const { data, isLoading, error } = useCatalog({
+  const queryClient = useQueryClient();
+  const { data, isLoading, error, isFetching, isPlaceholderData } = useCatalog({
     page,
     limit: pageSize,
     sort: sortKey,
     q: debouncedQ,
     analyzedOnly: filterAnalyzed,
     withScripts: filterScripts,
+    includeStats: false,
   });
+  const { data: catalogStats } = useCatalogStats();
 
   const skills = data?.skills ?? [];
   const total = data?.total ?? 0;
   const totalPages = data?.totalPages ?? 1;
   const limit = data?.limit ?? pageSize;
+
+  useEffect(() => {
+    if (!data || totalPages <= 1) return;
+    prefetchCatalogNeighbors(queryClient, {
+      page,
+      totalPages,
+      limit: pageSize,
+      sort: sortKey,
+      q: debouncedQ,
+      analyzedOnly: filterAnalyzed,
+      withScripts: filterScripts,
+      includeStats: false,
+    });
+  }, [
+    queryClient,
+    data,
+    page,
+    totalPages,
+    pageSize,
+    sortKey,
+    debouncedQ,
+    filterAnalyzed,
+    filterScripts,
+  ]);
 
   const rangeLabel = useMemo(() => {
     if (total === 0) return "0 results";
@@ -80,7 +107,9 @@ export default function Catalog() {
         </h2>
         <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
           {rangeLabel}
-          {isLoading ? <span className="ml-2 text-slate-400">(updating…)</span> : null}
+          {isFetching && !isPlaceholderData ? (
+            <span className="ml-2 text-slate-400">(updating…)</span>
+          ) : null}
         </p>
         <p
           className="text-xs text-slate-500 dark:text-slate-500 mt-2 font-mono break-all"

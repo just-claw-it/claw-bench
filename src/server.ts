@@ -2,8 +2,17 @@ import express, { type Application, type Request, type Response } from "express"
 import * as path from "path";
 import * as fs from "fs";
 import {
-  query, storeRun, metadataCount, dbPath,
-  getClawHubSkillsPaged, getClawHubSkillDetail, getClawHubCatalogStats,
+  query,
+  storeRun,
+  dbPath,
+  withSerializedDb,
+  dbQueryAll,
+  getClawHubSkillsPaged,
+  getClawHubSkillDetail,
+  getClawHubCatalogStats,
+  getClawHubCatalogStatsOnDb,
+  getClawHubCatalogPeekTopOnDb,
+  getClawHubSkillsPagedOnDb,
 } from "./store.js";
 import { runsVisibilitySql, hideExampleRunsFromDashboard, isTestRunRow } from "./dashboardFilters.js";
 import {
@@ -34,6 +43,9 @@ export interface DashboardOptions {
   port: number;
 }
 
+/** Overview skills table: full leaderboard stays on /api/skills. */
+const OVERVIEW_SKILLS_LIMIT = 100;
+
 /** Express app with all dashboard API routes (used by `startDashboard` and tests). */
 export function createDashboardApp(): Application {
   const app = express();
@@ -44,34 +56,194 @@ export function createDashboardApp(): Application {
   app.get("/api/stats", async (_req: Request, res: Response) => {
     try {
       const vis = runsVisibilitySql();
-      const [runsRow, skills] = await Promise.all([
-        query<{ n: number }>(`SELECT COUNT(*) as n FROM runs WHERE 1=1 ${vis}`),
-        metadataCount(),
-      ]);
-      const runs = runsRow[0]?.n ?? 0;
-      const skillCount = await query<{ n: number }>(
-        `SELECT COUNT(DISTINCT skill_name) as n FROM runs WHERE skipped = 0 ${vis}`
+      const rows = await query<{
+        totalRuns: number;
+        totalSkills: number;
+        totalMetadata: number;
+        avgComposite: number | null;
+        firstRunAt: string | null;
+        lastRunAt: string | null;
+        clawhubCatalogSkills: number;
+      }>(
+        `SELECT
+          (SELECT COUNT(*) FROM runs WHERE 1=1 ${vis}) AS totalRuns,
+          (SELECT COUNT(DISTINCT skill_name) FROM runs WHERE skipped = 0 ${vis}) AS totalSkills,
+          (SELECT COUNT(*) FROM skill_metadata) AS totalMetadata,
+          (SELECT AVG(composite) FROM runs WHERE skipped = 0 ${vis}) AS avgComposite,
+          (SELECT MIN(benchmarked_at) FROM runs WHERE skipped = 0 ${vis}) AS firstRunAt,
+          (SELECT MAX(benchmarked_at) FROM runs WHERE skipped = 0 ${vis}) AS lastRunAt,
+          (SELECT COUNT(*) FROM clawhub_skills) AS clawhubCatalogSkills`
       );
-      const dateRange = await query<{ first_run: string; last_run: string }>(
-        `SELECT MIN(benchmarked_at) as first_run, MAX(benchmarked_at) as last_run
-         FROM runs WHERE skipped = 0 ${vis}`
-      );
-      const avgComposite = await query<{ avg: number }>(
-        `SELECT AVG(composite) as avg FROM runs WHERE skipped = 0 ${vis}`
-      );
-      const clawhubCats = await query<{ n: number }>(
-        `SELECT COUNT(*) as n FROM clawhub_skills`
-      );
+      const r = rows[0];
       res.json({
-        totalRuns: runs,
-        totalSkills: skillCount[0]?.n ?? 0,
-        totalMetadata: skills,
-        avgComposite: avgComposite[0]?.avg ?? 0,
-        firstRunAt: dateRange[0]?.first_run ?? null,
-        lastRunAt: dateRange[0]?.last_run ?? null,
+        totalRuns: r?.totalRuns ?? 0,
+        totalSkills: r?.totalSkills ?? 0,
+        totalMetadata: r?.totalMetadata ?? 0,
+        avgComposite: r?.avgComposite ?? 0,
+        firstRunAt: r?.firstRunAt ?? null,
+        lastRunAt: r?.lastRunAt ?? null,
         dbPath: dbPath(),
-        clawhubCatalogSkills: clawhubCats[0]?.n ?? 0,
+        clawhubCatalogSkills: r?.clawhubCatalogSkills ?? 0,
       });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  /** One DB open for Overview (replaces several parallel /api/* calls that each reloaded SQLite). */
+  app.get("/api/dashboard/overview", async (_req: Request, res: Response) => {
+    try {
+      const vis = runsVisibilitySql();
+      const visR = runsVisibilitySql("r");
+      const visR2 = runsVisibilitySql("r2");
+      const payload = await withSerializedDb((db) => {
+        if (!db) {
+          const emptyHist = [
+            { bucket: "0-20%", count: 0 },
+            { bucket: "20-40%", count: 0 },
+            { bucket: "40-60%", count: 0 },
+            { bucket: "60-80%", count: 0 },
+            { bucket: "80-100%", count: 0 },
+          ];
+          return {
+            stats: {
+              totalRuns: 0,
+              totalSkills: 0,
+              totalMetadata: 0,
+              avgComposite: 0,
+              firstRunAt: null as string | null,
+              lastRunAt: null as string | null,
+              dbPath: dbPath(),
+              clawhubCatalogSkills: 0,
+            },
+            runs: { recent: [] as Record<string, unknown>[], total: 0 },
+            scoreHistogram: emptyHist,
+            skills: [] as Record<string, unknown>[],
+            catalogStats: {
+              totalSkills: 0,
+              analyzedCount: 0,
+              avgOverallComposite: 0,
+              avgStaticComposite: 0,
+              withScripts: 0,
+              dbPath: dbPath(),
+            },
+            catalogPeek: {
+              skills: [] as Record<string, unknown>[],
+              total: 0,
+              page: 1,
+              limit: 5,
+              totalPages: 1,
+            },
+          };
+        }
+
+        const statsRow = dbQueryAll<{
+          totalRuns: number;
+          totalSkills: number;
+          totalMetadata: number;
+          avgComposite: number | null;
+          firstRunAt: string | null;
+          lastRunAt: string | null;
+          clawhubCatalogSkills: number;
+        }>(
+          db,
+          `SELECT
+            (SELECT COUNT(*) FROM runs WHERE 1=1 ${vis}) AS totalRuns,
+            (SELECT COUNT(DISTINCT skill_name) FROM runs WHERE skipped = 0 ${vis}) AS totalSkills,
+            (SELECT COUNT(*) FROM skill_metadata) AS totalMetadata,
+            (SELECT AVG(composite) FROM runs WHERE skipped = 0 ${vis}) AS avgComposite,
+            (SELECT MIN(benchmarked_at) FROM runs WHERE skipped = 0 ${vis}) AS firstRunAt,
+            (SELECT MAX(benchmarked_at) FROM runs WHERE skipped = 0 ${vis}) AS lastRunAt,
+            (SELECT COUNT(*) FROM clawhub_skills) AS clawhubCatalogSkills`
+        )[0];
+
+        const totalRunCount =
+          dbQueryAll<{ n: number }>(
+            db,
+            `SELECT COUNT(*) as n FROM runs WHERE 1=1 ${vis}`
+          )[0]?.n ?? 0;
+
+        const recent = dbQueryAll(
+          db,
+          `SELECT * FROM runs WHERE 1=1 ${vis} ORDER BY benchmarked_at DESC LIMIT 10`
+        );
+
+        const histRow = dbQueryAll<{
+          b0: number | null;
+          b1: number | null;
+          b2: number | null;
+          b3: number | null;
+          b4: number | null;
+        }>(
+          db,
+          `SELECT
+            SUM(CASE WHEN composite IS NOT NULL AND composite >= 0 AND composite < 0.2 THEN 1 ELSE 0 END) AS b0,
+            SUM(CASE WHEN composite >= 0.2 AND composite < 0.4 THEN 1 ELSE 0 END) AS b1,
+            SUM(CASE WHEN composite >= 0.4 AND composite < 0.6 THEN 1 ELSE 0 END) AS b2,
+            SUM(CASE WHEN composite >= 0.6 AND composite < 0.8 THEN 1 ELSE 0 END) AS b3,
+            SUM(CASE WHEN composite >= 0.8 AND composite <= 1.000001 THEN 1 ELSE 0 END) AS b4
+           FROM runs WHERE skipped = 0 ${vis}`
+        )[0];
+        const scoreHistogram = [
+          { bucket: "0-20%", count: Math.round(histRow?.b0 ?? 0) },
+          { bucket: "20-40%", count: Math.round(histRow?.b1 ?? 0) },
+          { bucket: "40-60%", count: Math.round(histRow?.b2 ?? 0) },
+          { bucket: "60-80%", count: Math.round(histRow?.b3 ?? 0) },
+          { bucket: "80-100%", count: Math.round(histRow?.b4 ?? 0) },
+        ];
+
+        const skills = dbQueryAll(
+          db,
+          `SELECT
+             skill_name,
+             skill_type,
+             COUNT(*) as run_count,
+             MAX(benchmarked_at) as last_benchmarked_at,
+             MAX(composite) as best_composite,
+             MIN(composite) as worst_composite,
+             (SELECT r2.composite FROM runs r2
+              WHERE r2.skill_name = r.skill_name AND r2.skipped = 0 ${visR2}
+              ORDER BY r2.benchmarked_at DESC LIMIT 1) as latest_composite,
+             (SELECT r2.score_type FROM runs r2
+              WHERE r2.skill_name = r.skill_name AND r2.skipped = 0 ${visR2}
+              ORDER BY r2.benchmarked_at DESC LIMIT 1) as latest_score_type
+           FROM runs r
+           WHERE skipped = 0 ${visR}
+           GROUP BY skill_name
+           ORDER BY latest_composite DESC
+           LIMIT ${OVERVIEW_SKILLS_LIMIT}`
+        );
+
+        const catBase = getClawHubCatalogStatsOnDb(db);
+        const peek = getClawHubCatalogPeekTopOnDb(db, 5);
+        const catTotal = catBase.totalSkills;
+        const totalPages = Math.max(1, Math.ceil(catTotal / 5));
+
+        return {
+          stats: {
+            totalRuns: statsRow?.totalRuns ?? 0,
+            totalSkills: statsRow?.totalSkills ?? 0,
+            totalMetadata: statsRow?.totalMetadata ?? 0,
+            avgComposite: statsRow?.avgComposite ?? 0,
+            firstRunAt: statsRow?.firstRunAt ?? null,
+            lastRunAt: statsRow?.lastRunAt ?? null,
+            dbPath: dbPath(),
+            clawhubCatalogSkills: statsRow?.clawhubCatalogSkills ?? 0,
+          },
+          runs: { recent, total: statsRow?.totalRuns ?? 0 },
+          scoreHistogram,
+          skills,
+          catalogStats: { ...catBase, dbPath: dbPath() },
+          catalogPeek: {
+            skills: peek.rows,
+            total: catTotal,
+            page: 1,
+            limit: 5,
+            totalPages,
+          },
+        };
+      });
+      res.json(payload);
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }
@@ -246,6 +418,51 @@ export function createDashboardApp(): Application {
         req.query.analyzed === "1" || req.query.analyzed === "true";
       const withScripts =
         req.query.scripts === "1" || req.query.scripts === "true";
+      const includeStats =
+        req.query.stats === "1" || req.query.stats === "true";
+
+      if (includeStats) {
+        const body = await withSerializedDb((db) => {
+          if (!db) {
+            const totalPages = 1;
+            return {
+              skills: [] as Record<string, unknown>[],
+              total: 0,
+              page,
+              limit,
+              totalPages,
+              stats: {
+                totalSkills: 0,
+                analyzedCount: 0,
+                avgOverallComposite: 0,
+                avgStaticComposite: 0,
+                withScripts: 0,
+                dbPath: dbPath(),
+              },
+            };
+          }
+          const { rows, total } = getClawHubSkillsPagedOnDb(db, {
+            page,
+            limit,
+            sort: sort as "overall" | "name" | "downloads" | "stars",
+            q: q || undefined,
+            analyzedOnly,
+            withScripts,
+          });
+          const totalPages = Math.max(1, Math.ceil(total / limit));
+          const catBase = getClawHubCatalogStatsOnDb(db);
+          return {
+            skills: rows,
+            total,
+            page,
+            limit,
+            totalPages,
+            stats: { ...catBase, dbPath: dbPath() },
+          };
+        });
+        res.json(body);
+        return;
+      }
 
       const { rows, total } = await getClawHubSkillsPaged({
         page,

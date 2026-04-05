@@ -405,6 +405,7 @@ See **Skill metadata** under [ClawHub: crawl, download, analyze](#clawhub-crawl-
 | `CLAWHUB_LLM_SLOW_MS` | LLM phase ≥ this ms → `llm_outcome=slow` (`0` = off) | `120000` |
 | `CLAWHUB_LLM_EXCLUDE_SLUGS` | Comma-separated slugs excluded from `--llm` (same as `--llm-exclude-slugs`) | — |
 | `CLAW_BENCH_USE_SQLITE3_CLI` | `0`/`false` = always sql.js for prefetch; `1`/`true` = require `sqlite3` CLI (falls back with warning) | unset (try CLI, then sql.js) |
+| `CLAW_BENCH_SQLJS_ONLY` | `1` = dashboard read paths use **sql.js** only (no native SQLite); unset = prefer **better-sqlite3** for reads when available | unset |
 | `CLAWHUB_API_KEY` | ClawHub leaderboard API key | — |
 | `CLAWHUB_API_URL` | ClawHub benchmark leaderboard `POST` URL | `https://api.clawhub.dev/v1/leaderboard` (legacy default; **override** if that host does not resolve) |
 | `CLAWHUB_CONVEX_URL` | Convex `.cloud` base URL for **`clawhub crawl`** and **`data sync-clawhub-metadata`** | `https://wry-manatee-359.convex.cloud` |
@@ -504,6 +505,14 @@ In Docker, use **`node dist/cli.js dashboard`** ([Docker](#docker)).
 - **Compare** — 2–4 skills side-by-side
 - **Import** — `benchmark-report.json` drop-in import
 
+### Performance (large SQLite files)
+
+- **Reads** — Dashboard API routes use **`better-sqlite3`** (native SQLite, mmap-friendly) for read-heavy queries when the dependency is installed. Writes and CLI paths still use **sql.js** for portability. Set **`CLAW_BENCH_SQLJS_ONLY=1`** to force sql.js for reads (debug or environments without native builds). Read connections reuse a cached handle until the DB file changes or a write flushes.
+- **Indexes** — Migrations add indexes on hot paths (e.g. `runs(skipped, benchmarked_at)`, `clawhub_analysis(slug, analyzed_at DESC)`, `runs(skill_name, skipped, benchmarked_at DESC)`). Open the DB once via **`clawhub crawl`**, **`import`**, or any sql.js write so migrations run. After bulk imports, **`ANALYZE`** helps the planner (`sqlite3 clawhub/bench.db 'ANALYZE;'`).
+- **Overview API** — `GET /api/dashboard/overview` batches work in **one** DB open: score buckets are aggregated in SQL, only **10** recent runs are returned, the benchmark skills table is **capped** (`OVERVIEW_SKILLS_LIMIT` in `server.ts`), and the catalog “peek” uses a **lightweight** top-skills query (not the full catalog join).
+- **ClawHub Catalog API** — `GET /api/catalog` returns paginated rows. **`COUNT(*)`** uses a minimal join (`clawhub_skills` + latest analysis only) so it matches list filters without computing LLM/json aggregates for every row. The **full** join runs only for the **data** query (scores, LLM breakdown). **`GET /api/catalog?stats=1`** bundles global catalog statistics (same as `GET /api/catalog/stats`) for clients that want one HTTP round-trip; the dashboard UI loads **`/api/catalog/stats`** separately (5‑minute **staleTime**) so paging and filters do not recompute global aggregates on every request.
+- **UI** — React Query uses **staleTime** and **prefetch** for catalog pages; use the production build (`npm run dashboard:build`) for the static bundle.
+
 ### Development mode
 
 Two terminals — **API** (Express + SQLite) and **Vite** (hot reload; proxies **`/api`** to the API port):
@@ -529,6 +538,8 @@ npm test
 ```
 
 `dist/` is not committed; run `npm run build` after pulling. Dashboard: `npm run dashboard:install` and `npm run dashboard:build`. Tests: **`npm test`** runs the Node suite plus **Vitest** for the dashboard UI (requires `npm run dashboard:install` first). Use **`npm run test:run`** for Node-only tests after a build, or **`npm run dashboard:test`** for dashboard tests only. Set **`CLAWHUB_SKIP_NETWORK_SMOKE=1`** to skip the optional Convex smoke test (`data sync-clawhub-metadata` dry-run) when offline.
+
+**Before committing** (recommended): **`npm run build`**, then **`npm run test:run`** and **`npm run dashboard:test`** (or **`npm test`** for the full suite). Root **`dist/`** and **`dashboard/dist/`** are gitignored — production images / releases run **`npm run dashboard:build`** as part of the build.
 
 ## License
 

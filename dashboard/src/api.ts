@@ -1,7 +1,13 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  useQuery,
+  useMutation,
+  useQueryClient,
+  keepPreviousData,
+  type QueryClient,
+} from "@tanstack/react-query";
 import type {
   Run, Skill, Stats, DriftAnalysis,
-  CatalogPage, SkillAnalysisDetail, CatalogStats,
+  CatalogPage, SkillAnalysisDetail, CatalogStats, DashboardOverview,
 } from "./types";
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -66,28 +72,77 @@ export interface UseCatalogOpts {
   q?: string;
   analyzedOnly?: boolean;
   withScripts?: boolean;
+  /** When true, server bundles `/api/catalog/stats` into the same response (one HTTP + one DB pass). */
+  includeStats?: boolean;
+}
+
+function normalizedCatalogOpts(opts: UseCatalogOpts) {
+  return {
+    page: opts.page ?? 1,
+    limit: opts.limit ?? 50,
+    sort: opts.sort ?? "overall",
+    q: opts.q ?? "",
+    analyzedOnly: opts.analyzedOnly ?? false,
+    withScripts: opts.withScripts ?? false,
+    includeStats: opts.includeStats ?? false,
+  };
+}
+
+/** Plain fetch for prefetching / tooling. */
+export async function fetchCatalogPage(opts: UseCatalogOpts = {}): Promise<CatalogPage> {
+  const { page, limit, sort, q, analyzedOnly, withScripts, includeStats } =
+    normalizedCatalogOpts(opts);
+  const sp = new URLSearchParams();
+  sp.set("page", String(page));
+  sp.set("limit", String(limit));
+  sp.set("sort", sort);
+  if (q.trim()) sp.set("q", q.trim());
+  if (analyzedOnly) sp.set("analyzed", "1");
+  if (withScripts) sp.set("scripts", "1");
+  if (includeStats) sp.set("stats", "1");
+  return fetchJson<CatalogPage>(`/api/catalog?${sp.toString()}`);
+}
+
+export function catalogListQueryOptions(opts: UseCatalogOpts = {}) {
+  const { page, limit, sort, q, analyzedOnly, withScripts, includeStats } =
+    normalizedCatalogOpts(opts);
+  return {
+    queryKey: [
+      "catalog",
+      page,
+      limit,
+      sort,
+      q,
+      analyzedOnly,
+      withScripts,
+      includeStats,
+    ] as const,
+    queryFn: () => fetchCatalogPage(opts),
+    staleTime: 60_000,
+  };
+}
+
+/** Warm next/prev pages so pagination often hits the React Query cache. */
+export function prefetchCatalogNeighbors(
+  qc: QueryClient,
+  opts: UseCatalogOpts & { totalPages: number }
+): void {
+  const page = opts.page ?? 1;
+  const { totalPages, ...rest } = opts;
+  if (totalPages <= 1) return;
+  const prefetchOpts = { ...rest, includeStats: false };
+  if (page < totalPages) {
+    void qc.prefetchQuery(catalogListQueryOptions({ ...prefetchOpts, page: page + 1 }));
+  }
+  if (page > 1) {
+    void qc.prefetchQuery(catalogListQueryOptions({ ...prefetchOpts, page: page - 1 }));
+  }
 }
 
 export function useCatalog(opts: UseCatalogOpts = {}) {
-  const page = opts.page ?? 1;
-  const limit = opts.limit ?? 50;
-  const sort = opts.sort ?? "overall";
-  const q = opts.q ?? "";
-  const analyzedOnly = opts.analyzedOnly ?? false;
-  const withScripts = opts.withScripts ?? false;
-
   return useQuery<CatalogPage>({
-    queryKey: ["catalog", page, limit, sort, q, analyzedOnly, withScripts],
-    queryFn: () => {
-      const sp = new URLSearchParams();
-      sp.set("page", String(page));
-      sp.set("limit", String(limit));
-      sp.set("sort", sort);
-      if (q.trim()) sp.set("q", q.trim());
-      if (analyzedOnly) sp.set("analyzed", "1");
-      if (withScripts) sp.set("scripts", "1");
-      return fetchJson<CatalogPage>(`/api/catalog?${sp.toString()}`);
-    },
+    ...catalogListQueryOptions(opts),
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -103,6 +158,16 @@ export function useCatalogStats() {
   return useQuery<CatalogStats>({
     queryKey: ["catalogStats"],
     queryFn: () => fetchJson("/api/catalog/stats"),
+    /** Global counts — independent of catalog page/filters; avoid refetching on every list navigation. */
+    staleTime: 300_000,
+  });
+}
+
+export function useDashboardOverview() {
+  return useQuery<DashboardOverview>({
+    queryKey: ["dashboardOverview"],
+    queryFn: () => fetchJson<DashboardOverview>("/api/dashboard/overview"),
+    staleTime: 60_000,
   });
 }
 
@@ -126,6 +191,7 @@ export function useImportReport() {
       qc.invalidateQueries({ queryKey: ["skills"] });
       qc.invalidateQueries({ queryKey: ["catalog"] });
       qc.invalidateQueries({ queryKey: ["catalogStats"] });
+      qc.invalidateQueries({ queryKey: ["dashboardOverview"] });
     },
   });
 }

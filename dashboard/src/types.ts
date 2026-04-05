@@ -151,6 +151,8 @@ export interface CatalogPage {
   page: number;
   limit: number;
   totalPages: number;
+  /** Present when `stats=1` — one round-trip with catalog rows (see server). */
+  stats?: CatalogStats;
 }
 
 export interface SkillAnalysisDetail extends CatalogSkill {
@@ -186,4 +188,23 @@ export interface CatalogStats {
   withScripts: number;
   /** Resolved SQLite path (same as server `CLAW_BENCH_DB` or default). */
   dbPath: string;
+}
+
+/** Pre-aggregated score buckets (same labels as the old client histogram). */
+export interface ScoreHistogramBucket {
+  bucket: string;
+  count: number;
+}
+
+/** Single payload for Overview (one DB round-trip on the server). */
+export interface DashboardOverview {
+  stats: Stats;
+  /** Total matching runs; `recent` is only the latest rows for the table. */
+  runs: { recent: Run[]; total: number };
+  /** Server-side aggregation — avoids loading every run row for the chart. */
+  scoreHistogram: ScoreHistogramBucket[];
+  /** Capped leaderboard for fast first paint (see README / Dashboard performance). */
+  skills: Skill[];
+  catalogStats: CatalogStats;
+  catalogPeek: CatalogPage;
 }

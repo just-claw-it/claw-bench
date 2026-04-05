@@ -1,6 +1,6 @@
 /**
- * Dashboard data contract: catalog detail query + HTTP GET /api/catalog/:slug
- * (timings, analysis_insights, import-metadata join).
+ * Dashboard data contract: catalog list (with/without bundled stats), `/api/catalog/stats`,
+ * detail query, HTTP GET /api/catalog/:slug (timings, analysis_insights, import-metadata join).
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -191,6 +191,134 @@ describe("dashboard catalog API contract", () => {
       assert.equal(typeof body.analysis_insights, "string");
       assert.ok(body.import_meta_recorded_at);
       assert.ok(Array.isArray(body.files));
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("GET /api/catalog?stats=1 returns paginated skills and bundled catalog stats", async () => {
+    const { createDashboardApp } = await import("../server.js");
+    const app = createDashboardApp();
+    const server = http.createServer(app);
+
+    await new Promise<void>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+      server.on("error", reject);
+    });
+
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const url =
+        `http://127.0.0.1:${port}/api/catalog?page=1&limit=10&sort=name&stats=1`;
+      const res = await fetch(url);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as Record<string, unknown>;
+
+      assert.ok(Array.isArray(body.skills));
+      assert.equal(typeof body.total, "number");
+      assert.equal(body.page, 1);
+      assert.equal(body.limit, 10);
+      assert.equal(typeof body.totalPages, "number");
+
+      const stats = body.stats as Record<string, unknown> | undefined;
+      assert.ok(stats, "expected stats when stats=1");
+      assert.equal(typeof stats.dbPath, "string");
+      assert.equal(typeof stats.totalSkills, "number");
+      assert.equal(typeof stats.analyzedCount, "number");
+      assert.equal(typeof stats.avgOverallComposite, "number");
+      assert.equal(typeof stats.avgStaticComposite, "number");
+      assert.equal(typeof stats.withScripts, "number");
+
+      const res2 = await fetch(url);
+      assert.equal(res2.status, 200);
+      const body2 = (await res2.json()) as Record<string, unknown>;
+      assert.ok(body2.stats);
+      assert.equal(body2.total, body.total);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("GET /api/catalog without stats=1 returns rows but no bundled stats object", async () => {
+    const { createDashboardApp } = await import("../server.js");
+    const app = createDashboardApp();
+    const server = http.createServer(app);
+
+    await new Promise<void>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+      server.on("error", reject);
+    });
+
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:${port}/api/catalog?page=1&limit=10&sort=name`
+      );
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as Record<string, unknown>;
+      assert.ok(Array.isArray(body.skills));
+      assert.equal(typeof body.total, "number");
+      assert.equal(body.stats, undefined);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("GET /api/catalog/stats returns global catalog statistics", async () => {
+    const { createDashboardApp } = await import("../server.js");
+    const app = createDashboardApp();
+    const server = http.createServer(app);
+
+    await new Promise<void>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+      server.on("error", reject);
+    });
+
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/catalog/stats`);
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as Record<string, unknown>;
+      assert.equal(typeof body.totalSkills, "number");
+      assert.equal(typeof body.analyzedCount, "number");
+      assert.equal(typeof body.dbPath, "string");
+      assert.equal(typeof body.avgOverallComposite, "number");
+      assert.equal(typeof body.avgStaticComposite, "number");
+      assert.equal(typeof body.withScripts, "number");
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("GET /api/catalog total matches whether or not stats=1 is bundled", async () => {
+    const { createDashboardApp } = await import("../server.js");
+    const app = createDashboardApp();
+    const server = http.createServer(app);
+
+    await new Promise<void>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+      server.on("error", reject);
+    });
+
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const base =
+        `http://127.0.0.1:${port}/api/catalog?page=1&limit=5&sort=name`;
+      const listOnly = (await fetch(base).then((r) => r.json())) as {
+        total: number;
+      };
+      const withStats = (await fetch(`${base}&stats=1`).then((r) =>
+        r.json()
+      )) as { total: number };
+      assert.equal(listOnly.total, withStats.total);
+
+      const filtered = (await fetch(
+        `${base}&analyzed=1&scripts=1&stats=1`
+      ).then((r) => r.json())) as { total: number };
+      const filteredList = (await fetch(
+        `${base}&analyzed=1&scripts=1`
+      ).then((r) => r.json())) as { total: number };
+      assert.equal(filteredList.total, filtered.total);
     } finally {
       await closeServer(server);
     }

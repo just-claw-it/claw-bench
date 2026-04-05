@@ -1,40 +1,28 @@
-import { useStats, useRuns, useSkills, useCatalog, useCatalogStats } from "../api";
+import { lazy, Suspense } from "react";
+import { useDashboardOverview } from "../api";
 import StatCard from "../components/StatCard";
 import RunsTable from "../components/RunsTable";
-import { pct, scoreColor } from "../types";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  CartesianGrid,
-} from "recharts";
+import { pct, scoreColor, type Skill, type CatalogSkill } from "../types";
+
+const OverviewScoreChart = lazy(() => import("../components/OverviewScoreChart"));
 
 export default function Overview() {
-  const stats = useStats();
-  const runs = useRuns();
-  const skills = useSkills();
-  const catalog = useCatalog({ page: 1, limit: 5, sort: "overall" });
-  const catalogStats = useCatalogStats();
+  const overview = useDashboardOverview();
 
-  if (stats.isLoading || runs.isLoading) {
+  if (overview.isLoading) {
     return <Loading />;
   }
 
-  if (stats.error) {
+  if (overview.error) {
     return <ErrorBox message="Could not connect to API. Is the server running?" />;
   }
 
-  const s = stats.data!;
-  const allRuns = runs.data?.runs ?? [];
-  const recentRuns = allRuns.slice(0, 10);
-
-  const histogram = buildHistogram(allRuns.map((r) => r.composite));
+  const s = overview.data!.stats;
+  const recentRuns = overview.data!.runs.recent;
+  const histogram = overview.data!.scoreHistogram;
 
   const chCats = s.clawhubCatalogSkills ?? 0;
-  const benchEmpty = s.totalRuns === 0 && allRuns.length === 0;
+  const benchEmpty = s.totalRuns === 0 && overview.data!.runs.total === 0;
 
   return (
     <div className="space-y-8">
@@ -86,37 +74,29 @@ export default function Overview() {
         />
       </div>
 
-      {histogram.length > 0 && (
+      {histogram.some((h) => h.count > 0) && (
         <section>
           <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-200 mb-4">
             Score Distribution
           </h3>
-          <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 shadow-sm">
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={histogram}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                <XAxis dataKey="bucket" tick={{ fill: "#94a3b8", fontSize: 11 }} />
-                <YAxis tick={{ fill: "#94a3b8", fontSize: 11 }} allowDecimals={false} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: "#1e293b",
-                    border: "1px solid #334155",
-                    borderRadius: 8,
-                    color: "#e2e8f0",
-                  }}
-                />
-                <Bar dataKey="count" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          <Suspense
+            fallback={
+              <div className="rounded-xl border border-slate-200 dark:border-slate-800 h-[220px] animate-pulse bg-slate-100 dark:bg-slate-800/50" />
+            }
+          >
+            <OverviewScoreChart histogram={histogram} />
+          </Suspense>
         </section>
       )}
 
-      {skills.data && skills.data.length > 0 && (
+      {overview.data!.skills.length > 0 && (
         <section>
-          <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-200 mb-4">
+          <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-200">
             Skills Leaderboard
           </h3>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
+            Top {overview.data!.skills.length} skills by latest score (preview; full aggregation is heavier).
+          </p>
           <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
             <table className="w-full text-sm">
               <thead className="bg-slate-100 dark:bg-slate-800/50">
@@ -129,7 +109,7 @@ export default function Overview() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
-                {skills.data.map((sk, i) => (
+                {overview.data!.skills.map((sk: Skill, i: number) => (
                   <tr key={sk.skill_name} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
                     <td className="px-4 py-2 text-slate-400 font-mono text-xs">{i + 1}</td>
                     <td className="px-4 py-2">
@@ -158,7 +138,7 @@ export default function Overview() {
       )}
 
       {/* ClawHub Catalog section */}
-      {catalogStats.data && catalogStats.data.totalSkills > 0 && (
+      {overview.data!.catalogStats.totalSkills > 0 && (
         <section>
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-semibold text-slate-800 dark:text-slate-200">
@@ -172,15 +152,15 @@ export default function Overview() {
             </a>
           </div>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
-            <StatCard label="Catalog Skills" value={catalogStats.data.totalSkills} />
-            <StatCard label="Analyzed" value={catalogStats.data.analyzedCount} />
+            <StatCard label="Catalog Skills" value={overview.data!.catalogStats.totalSkills} />
+            <StatCard label="Analyzed" value={overview.data!.catalogStats.analyzedCount} />
             <StatCard
               label="Avg Score"
-              value={catalogStats.data.analyzedCount > 0 ? pct(catalogStats.data.avgOverallComposite) : "--"}
+              value={overview.data!.catalogStats.analyzedCount > 0 ? pct(overview.data!.catalogStats.avgOverallComposite) : "--"}
             />
-            <StatCard label="With Scripts" value={catalogStats.data.withScripts} />
+            <StatCard label="With Scripts" value={overview.data!.catalogStats.withScripts} />
           </div>
-          {catalog.data?.skills && catalog.data.skills.length > 0 && (
+          {overview.data!.catalogPeek.skills.length > 0 && (
             <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
               <table className="w-full text-sm">
                 <thead className="bg-slate-100 dark:bg-slate-800/50">
@@ -192,7 +172,7 @@ export default function Overview() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
-                  {catalog.data.skills.map((sk, i) => (
+                  {overview.data!.catalogPeek.skills.map((sk: CatalogSkill, i: number) => (
                     <tr key={sk.slug} className="hover:bg-slate-50 dark:hover:bg-slate-800/50">
                       <td className="px-4 py-2 text-slate-400 font-mono text-xs">{i + 1}</td>
                       <td className="px-4 py-2">
@@ -230,21 +210,6 @@ export default function Overview() {
       )}
     </div>
   );
-}
-
-function buildHistogram(composites: number[]) {
-  const buckets = [
-    { bucket: "0-20%", min: 0, max: 0.2, count: 0 },
-    { bucket: "20-40%", min: 0.2, max: 0.4, count: 0 },
-    { bucket: "40-60%", min: 0.4, max: 0.6, count: 0 },
-    { bucket: "60-80%", min: 0.6, max: 0.8, count: 0 },
-    { bucket: "80-100%", min: 0.8, max: 1.01, count: 0 },
-  ];
-  for (const c of composites) {
-    const b = buckets.find((b) => c >= b.min && c < b.max);
-    if (b) b.count++;
-  }
-  return buckets.map(({ bucket, count }) => ({ bucket, count }));
 }
 
 function timeAgo(iso: string): string {

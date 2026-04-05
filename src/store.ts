@@ -1,7 +1,9 @@
 /**
  * store.ts — SQLite-backed persistence for benchmark runs and ClawHub metadata.
  *
- * Uses sql.js (pure JS, no native build). The database is a single file:
+ * Uses sql.js for writes and CLI portability. Read-heavy paths (`withSerializedDb`)
+ * prefer `better-sqlite3` when installed (native SQLite, mmap — similar to desktop DB browsers);
+ * set `CLAW_BENCH_SQLJS_ONLY=1` to force sql.js. The database is a single file:
  *   <cwd>/clawhub/bench.db   (default)
  *   or CLAW_BENCH_DB env var (absolute or relative path)
  *
@@ -15,15 +17,30 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import * as os from "os";
 import { spawnSync } from "node:child_process";
 import initSqlJs, { type Database, type SqlJsStatic } from "sql.js";
+import BetterSqlite from "better-sqlite3";
 import { BenchmarkReport, SkillMetadata, ClawHubSkillEntry, ClawHubAnalysis } from "./types.js";
 import {
   CLAWHUB_LLM_LATEST_PER_MODEL_SUB,
   buildClawhubLlmAggregateSubquery,
   clawhubOverallCompositeSqlExpr,
 } from "./clawhub-scoring.js";
+
+/** Native SQLite instance (better-sqlite3). */
+export type NativeReadDb = InstanceType<typeof BetterSqlite>;
+
+/** sql.js or native SQLite — anything passed to {@link dbQueryAll} from {@link withSerializedDb}. */
+export type ReadOnlyDb = Database | NativeReadDb;
+
+function getBetterSqliteCtor(): typeof BetterSqlite | null {
+  if (process.env.CLAW_BENCH_SQLJS_ONLY === "1") return null;
+  return BetterSqlite;
+}
+
+function isSqlJsReadDb(db: ReadOnlyDb): db is Database {
+  return typeof (db as Database).export === "function";
+}
 
 // ── DB path ────────────────────────────────────────────────────────────────
 
@@ -218,6 +235,22 @@ function backfillClawhubAnalysisLlmOutcomeOk(db: Database): void {
   );
 }
 
+function ensureRunsDashboardIndexes(db: Database): void {
+  db.run(
+    `CREATE INDEX IF NOT EXISTS idx_runs_skipped_benchmark ON runs(skipped, benchmarked_at DESC)`
+  );
+}
+
+/** Speeds up latest-analysis lookups and overview leaderboard subqueries. */
+function ensureClawHubQueryIndexes(db: Database): void {
+  db.run(
+    `CREATE INDEX IF NOT EXISTS idx_clawhub_analysis_slug_analyzed_at ON clawhub_analysis(slug, analyzed_at DESC)`
+  );
+  db.run(
+    `CREATE INDEX IF NOT EXISTS idx_runs_skill_skipped_bench ON runs(skill_name, skipped, benchmarked_at DESC)`
+  );
+}
+
 function migrate(db: Database): void {
   // Drop old install_counts table if it exists from a previous schema version
   db.run(`DROP TABLE IF EXISTS install_counts`);
@@ -226,6 +259,8 @@ function migrate(db: Database): void {
   ensureClawhubAnalysisTimingColumns(db);
   ensureClawhubAnalysisLlmOutcomeColumn(db);
   backfillClawhubAnalysisLlmOutcomeOk(db);
+  ensureRunsDashboardIndexes(db);
+  ensureClawHubQueryIndexes(db);
 }
 
 /** Stale -wal / -shm from legacy WAL mode break sql.js opens — safe to remove for this app. */
@@ -322,6 +357,90 @@ function serialize<T>(fn: () => Promise<T>): Promise<T> {
 
 // ── Load / save ────────────────────────────────────────────────────────────
 
+/** sql.js in-memory read cache (fallback when native SQLite is unavailable). */
+let _readDbCache: {
+  filePath: string;
+  mtimeMs: number;
+  size: number;
+  db: Database;
+} | null = null;
+
+/** Native read-only handle — avoids loading the whole DB into WASM. */
+let _nativeReadDb: {
+  filePath: string;
+  mtimeMs: number;
+  size: number;
+  db: NativeReadDb;
+} | null = null;
+
+function invalidateReadDbCache(): void {
+  if (_readDbCache) {
+    try {
+      _readDbCache.db.close();
+    } catch {
+      /* ignore */
+    }
+    _readDbCache = null;
+  }
+  if (_nativeReadDb) {
+    try {
+      _nativeReadDb.db.close();
+    } catch {
+      /* ignore */
+    }
+    _nativeReadDb = null;
+  }
+}
+
+function tryOpenNativeForRead(filePath: string, st: fs.Stats): NativeReadDb | null {
+  const Ctor = getBetterSqliteCtor();
+  if (!Ctor) return null;
+  if (
+    _nativeReadDb &&
+    _nativeReadDb.filePath === filePath &&
+    _nativeReadDb.mtimeMs === st.mtimeMs &&
+    _nativeReadDb.size === st.size
+  ) {
+    return _nativeReadDb.db;
+  }
+  if (_nativeReadDb) {
+    try {
+      _nativeReadDb.db.close();
+    } catch {
+      /* ignore */
+    }
+    _nativeReadDb = null;
+  }
+  try {
+    stripWalSidecarFiles(filePath);
+    const db = new Ctor(filePath, { readonly: true, fileMustExist: true });
+    try {
+      db.pragma("cache_size = -131072");
+      db.pragma("mmap_size = 268435456");
+      db.pragma("temp_store = MEMORY");
+    } catch {
+      /* ignore pragma failures on exotic builds */
+    }
+    _nativeReadDb = {
+      filePath,
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+      db,
+    };
+    return db;
+  } catch {
+    if (_nativeReadDb?.filePath === filePath) {
+      try {
+        _nativeReadDb.db.close();
+      } catch {
+        /* ignore */
+      }
+      _nativeReadDb = null;
+    }
+    return null;
+  }
+}
+
 function loadDb(SQL: SqlJsStatic, filePath: string): Database {
   if (fs.existsSync(filePath)) {
     stripWalSidecarFiles(filePath);
@@ -333,10 +452,57 @@ function loadDb(SQL: SqlJsStatic, filePath: string): Database {
   return db;
 }
 
+/**
+ * Shared read-only connection for dashboard queries.
+ * Prefers native SQLite (mmap, no full-file WASM load); falls back to cached sql.js.
+ * Invalidated when the file changes on disk or after any `saveDb`.
+ */
+function loadDbForRead(SQL: SqlJsStatic, filePath: string): ReadOnlyDb {
+  const st = fs.statSync(filePath);
+  const native = tryOpenNativeForRead(filePath, st);
+  if (native) {
+    if (_readDbCache) {
+      try {
+        _readDbCache.db.close();
+      } catch {
+        /* ignore */
+      }
+      _readDbCache = null;
+    }
+    return native;
+  }
+
+  if (
+    _readDbCache &&
+    _readDbCache.filePath === filePath &&
+    _readDbCache.mtimeMs === st.mtimeMs &&
+    _readDbCache.size === st.size
+  ) {
+    return _readDbCache.db;
+  }
+  if (_readDbCache) {
+    try {
+      _readDbCache.db.close();
+    } catch {
+      /* ignore */
+    }
+    _readDbCache = null;
+  }
+  const db = loadDb(SQL, filePath);
+  _readDbCache = {
+    filePath,
+    mtimeMs: st.mtimeMs,
+    size: st.size,
+    db,
+  };
+  return db;
+}
+
 function saveDb(db: Database, filePath: string): void {
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(filePath, Buffer.from(db.export()));
+  invalidateReadDbCache();
 }
 
 // ── Benchmark run storage ──────────────────────────────────────────────────
@@ -350,6 +516,7 @@ export function storeRun(
   opts: StoreRunOptions = {}
 ): Promise<number> {
   return serialize(async () => {
+  invalidateReadDbCache();
   const SQL = await getSql();
   const fp = dbPath();
   const db = loadDb(SQL, fp);
@@ -426,6 +593,7 @@ export function importSkillMetadata(
   options?: ImportSkillMetadataOptions
 ): Promise<{ upserted: number; installSnapshots: number; versions: number; deps: number }> {
   return serialize(async () => {
+  invalidateReadDbCache();
   const SQL = await getSql();
   const fp = dbPath();
   const db = loadDb(SQL, fp);
@@ -655,25 +823,48 @@ export function exportSkillMetadata(): Promise<SkillMetadata[]> {
 
 // ── Low-level query helper ────────────────────────────────────────────────
 
+/** Run multiple reads in one lock + one sql.js load (critical for large DBs). */
+export async function withSerializedDb<T>(fn: (db: ReadOnlyDb | null) => T): Promise<T> {
+  return serialize(async () => {
+    const SQL = await getSql();
+    const fp = dbPath();
+    if (!fs.existsSync(fp)) return fn(null);
+
+    const db = loadDbForRead(SQL, fp);
+    return fn(db);
+  });
+}
+
+export function dbQueryAll<T = Record<string, unknown>>(
+  db: ReadOnlyDb,
+  sql: string,
+  params: (string | number | null)[] = []
+): T[] {
+  if (!isSqlJsReadDb(db)) {
+    const stmt = db.prepare(sql);
+    const rows =
+      params.length === 0
+        ? (stmt.all() as T[])
+        : (stmt.all(...params) as T[]);
+    return rows;
+  }
+  const stmt = db.prepare(sql);
+  stmt.bind(params);
+  const results: T[] = [];
+  while (stmt.step()) {
+    results.push(stmt.getAsObject() as T);
+  }
+  stmt.free();
+  return results;
+}
+
 export function query<T = Record<string, unknown>>(
   sql: string,
   params: (string | number | null)[] = []
 ): Promise<T[]> {
-  return serialize(async () => {
-    const SQL = await getSql();
-    const fp = dbPath();
-    if (!fs.existsSync(fp)) return [];
-
-    const db = loadDb(SQL, fp);
-    const results: T[] = [];
-    const stmt = db.prepare(sql);
-    stmt.bind(params);
-    while (stmt.step()) {
-      results.push(stmt.getAsObject() as T);
-    }
-    stmt.free();
-    db.close();
-    return results;
+  return withSerializedDb((db) => {
+    if (!db) return [];
+    return dbQueryAll<T>(db, sql, params);
   });
 }
 
@@ -750,6 +941,7 @@ export function upsertClawHubSkill(
   extra: ClawHubSkillUpsertExtra = {}
 ): Promise<void> {
   return serialize(async () => {
+    invalidateReadDbCache();
     const SQL = await getSql();
     const fp = dbPath();
     const db = loadDb(SQL, fp);
@@ -782,6 +974,7 @@ export function upsertClawHubSkillsBatch(
   if (rows.length === 0) return Promise.resolve();
   return serialize(async () => {
     options?.onBatchBegin?.();
+    invalidateReadDbCache();
     const SQL = await getSql();
     const fp = dbPath();
     const db = loadDb(SQL, fp);
@@ -959,6 +1152,7 @@ export async function getSlugsWithAnyClawHubAnalysis(): Promise<Set<string>> {
 /** Remove every row in `clawhub_analysis` (full catalog re-analyze). */
 export function deleteAllClawHubAnalysis(): Promise<void> {
   return serialize(async () => {
+    invalidateReadDbCache();
     const SQL = await getSql();
     const fp = dbPath();
     if (!fs.existsSync(fp)) return;
@@ -973,6 +1167,7 @@ export function deleteAllClawHubAnalysis(): Promise<void> {
 export function deleteClawHubAnalysisForSlugs(slugs: string[]): Promise<void> {
   if (slugs.length === 0) return Promise.resolve();
   return serialize(async () => {
+    invalidateReadDbCache();
     const SQL = await getSql();
     const fp = dbPath();
     if (!fs.existsSync(fp)) return;
@@ -991,6 +1186,7 @@ export function deleteClawHubAnalysisForSlugs(slugs: string[]): Promise<void> {
 /** Remove analysis rows for one LLM model across all slugs. */
 export function deleteAllClawHubAnalysisForModel(llmModel: string): Promise<void> {
   return serialize(async () => {
+    invalidateReadDbCache();
     const SQL = await getSql();
     const fp = dbPath();
     if (!fs.existsSync(fp)) return;
@@ -1028,6 +1224,7 @@ export function deleteClawHubAnalysisForSlugsAndModel(
 
 export function storeClawHubAnalysis(analysis: ClawHubAnalysis): Promise<number> {
   return serialize(async () => {
+    invalidateReadDbCache();
     const SQL = await getSql();
     const fp = dbPath();
     const db = loadDb(SQL, fp);
@@ -1129,6 +1326,14 @@ LEFT JOIN (
 ) llm_json ON llm_json.slug = s.slug`;
 }
 
+/** For COUNT(*) only — matches filters; avoids LLM aggregate + json_group_array (very slow on large DBs). */
+function clawhubCatalogCountJoinSql(): string {
+  return `FROM clawhub_skills s
+LEFT JOIN (
+  ${CLAWHUB_LATEST_ANALYSIS_SUB}
+) latest ON latest.slug = s.slug AND latest.rn = 1`;
+}
+
 function clawhubCatalogSelectSql(): string {
   const overall = clawhubOverallCompositeSqlExpr();
   return `SELECT s.*,
@@ -1171,10 +1376,37 @@ function catalogOrderBy(sort: ClawHubCatalogPageOpts["sort"]): string {
   }
 }
 
-/** Paginated catalog for the dashboard (search + filters + sort). */
-export async function getClawHubSkillsPaged(
+/**
+ * Top catalog rows by latest analysis score — for dashboard overview only.
+ * Avoids the full {@link clawhubCatalogAnalysisJoinSql} + COUNT used by the main catalog page.
+ */
+export function getClawHubCatalogPeekTopOnDb(
+  db: ReadOnlyDb,
+  limit: number
+): { rows: Record<string, unknown>[] } {
+  const lim = Math.min(50, Math.max(1, limit));
+  const rows = dbQueryAll<Record<string, unknown>>(
+    db,
+    `SELECT s.slug, s.name, s.author, s.version,
+            latest.overall_composite AS overall_composite
+     FROM clawhub_skills s
+     INNER JOIN (
+       SELECT slug, overall_composite,
+              ROW_NUMBER() OVER (PARTITION BY slug ORDER BY analyzed_at DESC) AS rn
+       FROM clawhub_analysis
+     ) latest ON latest.slug = s.slug AND latest.rn = 1
+     ORDER BY latest.overall_composite DESC
+     LIMIT ?`,
+    [lim]
+  );
+  return { rows };
+}
+
+/** Paginated catalog (same DB connection — use from `withSerializedDb` bundles). */
+export function getClawHubSkillsPagedOnDb(
+  db: ReadOnlyDb,
   opts: ClawHubCatalogPageOpts
-): Promise<{ rows: Record<string, unknown>[]; total: number }> {
+): { rows: Record<string, unknown>[]; total: number } {
   const page = Math.max(1, opts.page);
   const limit = Math.min(200, Math.max(1, opts.limit));
   const offset = (page - 1) * limit;
@@ -1201,15 +1433,25 @@ export async function getClawHubSkillsPaged(
   const orderSql = catalogOrderBy(opts.sort);
 
   const joinSql = clawhubCatalogAnalysisJoinSql();
+  const countJoinSql = clawhubCatalogCountJoinSql();
   const selectSql = clawhubCatalogSelectSql();
-  const countSql = `SELECT COUNT(*) as n ${joinSql} WHERE ${whereSql}`;
+  const countSql = `SELECT COUNT(*) as n ${countJoinSql} WHERE ${whereSql}`;
   const dataSql = `${selectSql} ${joinSql} WHERE ${whereSql} ORDER BY ${orderSql} LIMIT ? OFFSET ?`;
 
-  const totalRows = await query<{ n: number }>(countSql, params);
+  const totalRows = dbQueryAll<{ n: number }>(db, countSql, params);
   const total = totalRows[0]?.n ?? 0;
-
-  const rows = await query<Record<string, unknown>>(dataSql, [...params, limit, offset]);
+  const rows = dbQueryAll<Record<string, unknown>>(db, dataSql, [...params, limit, offset]);
   return { rows, total };
+}
+
+/** Paginated catalog for the dashboard (search + filters + sort). */
+export async function getClawHubSkillsPaged(
+  opts: ClawHubCatalogPageOpts
+): Promise<{ rows: Record<string, unknown>[]; total: number }> {
+  return withSerializedDb((db) => {
+    if (!db) return { rows: [], total: 0 };
+    return getClawHubSkillsPagedOnDb(db, opts);
+  });
 }
 
 /** Full catalog (CLI / legacy); avoid for large DBs — use getClawHubSkillsPaged. */
@@ -1291,6 +1533,46 @@ export async function getClawHubSkillDetail(slug: string): Promise<Record<string
   return rows[0] ?? null;
 }
 
+const CLAWHUB_CATALOG_STATS_COMBINED_SQL = `SELECT
+  (SELECT COUNT(*) FROM clawhub_skills) AS totalSkills,
+  (SELECT COUNT(*) FROM clawhub_skills s
+    WHERE EXISTS (SELECT 1 FROM clawhub_analysis ca WHERE ca.slug = s.slug)) AS analyzedCount,
+  (SELECT AVG(overall_composite) FROM (
+      SELECT overall_composite,
+        ROW_NUMBER() OVER (PARTITION BY slug ORDER BY analyzed_at DESC) AS rn
+      FROM clawhub_analysis
+    ) lp WHERE lp.rn = 1) AS avgOverallComposite,
+  (SELECT AVG(static_composite) FROM (
+      SELECT static_composite,
+        ROW_NUMBER() OVER (PARTITION BY slug ORDER BY analyzed_at DESC) AS rn
+      FROM clawhub_analysis
+    ) lp WHERE lp.rn = 1) AS avgStaticComposite,
+  (SELECT COUNT(*) FROM clawhub_skills WHERE has_scripts = 1) AS withScripts`;
+
+export function getClawHubCatalogStatsOnDb(db: ReadOnlyDb): {
+  totalSkills: number;
+  analyzedCount: number;
+  avgOverallComposite: number;
+  avgStaticComposite: number;
+  withScripts: number;
+} {
+  const rows = dbQueryAll<{
+    totalSkills: number;
+    analyzedCount: number;
+    avgOverallComposite: number | null;
+    avgStaticComposite: number | null;
+    withScripts: number;
+  }>(db, CLAWHUB_CATALOG_STATS_COMBINED_SQL);
+  const r = rows[0];
+  return {
+    totalSkills: r?.totalSkills ?? 0,
+    analyzedCount: r?.analyzedCount ?? 0,
+    avgOverallComposite: r?.avgOverallComposite ?? 0,
+    avgStaticComposite: r?.avgStaticComposite ?? 0,
+    withScripts: r?.withScripts ?? 0,
+  };
+}
+
 export async function getClawHubCatalogStats(): Promise<{
   totalSkills: number;
   analyzedCount: number;
@@ -1299,33 +1581,16 @@ export async function getClawHubCatalogStats(): Promise<{
   withScripts: number;
   dbPath: string;
 }> {
-  const total = await query<{ n: number }>("SELECT COUNT(*) as n FROM clawhub_skills");
-  /** Same semantics as catalog “Analyzed only” (skill in clawhub_skills with ≥1 analysis row). */
-  const analyzed = await query<{ n: number }>(
-    `SELECT COUNT(*) as n FROM clawhub_skills s
-     WHERE EXISTS (SELECT 1 FROM clawhub_analysis ca WHERE ca.slug = s.slug)`
-  );
-  const avgOverall = await query<{ avg: number }>(
-    `SELECT AVG(overall_composite) as avg FROM (
-       SELECT overall_composite, ROW_NUMBER() OVER (PARTITION BY slug ORDER BY analyzed_at DESC) AS rn
-       FROM clawhub_analysis
-     ) WHERE rn = 1`
-  );
-  const avgStatic = await query<{ avg: number }>(
-    `SELECT AVG(static_composite) as avg FROM (
-       SELECT static_composite, ROW_NUMBER() OVER (PARTITION BY slug ORDER BY analyzed_at DESC) AS rn
-       FROM clawhub_analysis
-     ) WHERE rn = 1`
-  );
-  const scripts = await query<{ n: number }>(
-    "SELECT COUNT(*) as n FROM clawhub_skills WHERE has_scripts = 1"
-  );
-  return {
-    totalSkills: total[0]?.n ?? 0,
-    analyzedCount: analyzed[0]?.n ?? 0,
-    avgOverallComposite: avgOverall[0]?.avg ?? 0,
-    avgStaticComposite: avgStatic[0]?.avg ?? 0,
-    withScripts: scripts[0]?.n ?? 0,
-    dbPath: dbPath(),
-  };
+  return withSerializedDb((db) => {
+    const base = db
+      ? getClawHubCatalogStatsOnDb(db)
+      : {
+          totalSkills: 0,
+          analyzedCount: 0,
+          avgOverallComposite: 0,
+          avgStaticComposite: 0,
+          withScripts: 0,
+        };
+    return { ...base, dbPath: dbPath() };
+  });
 }
