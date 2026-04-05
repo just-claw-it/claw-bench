@@ -2,8 +2,8 @@
  * store.ts — SQLite-backed persistence for benchmark runs and ClawHub metadata.
  *
  * Uses sql.js (pure JS, no native build). The database is a single file:
- *   ~/.claw-bench/bench.db   (default)
- *   or CLAW_BENCH_DB env var
+ *   <cwd>/clawhub/bench.db   (default)
+ *   or CLAW_BENCH_DB env var (absolute or relative path)
  *
  * Schema is forward-compatible with Postgres: all types map directly.
  * Migrating later = dump to CSV, load into Postgres, done.
@@ -28,10 +28,9 @@ import {
 // ── DB path ────────────────────────────────────────────────────────────────
 
 export function dbPath(): string {
-  return (
-    process.env.CLAW_BENCH_DB ??
-    path.join(os.homedir(), ".claw-bench", "bench.db")
-  );
+  const raw = process.env.CLAW_BENCH_DB?.trim();
+  if (raw) return path.resolve(raw);
+  return path.resolve(process.cwd(), "clawhub", "bench.db");
 }
 
 // ── Schema ─────────────────────────────────────────────────────────────────
@@ -1298,10 +1297,13 @@ export async function getClawHubCatalogStats(): Promise<{
   avgOverallComposite: number;
   avgStaticComposite: number;
   withScripts: number;
+  dbPath: string;
 }> {
   const total = await query<{ n: number }>("SELECT COUNT(*) as n FROM clawhub_skills");
+  /** Same semantics as catalog “Analyzed only” (skill in clawhub_skills with ≥1 analysis row). */
   const analyzed = await query<{ n: number }>(
-    "SELECT COUNT(DISTINCT slug) as n FROM clawhub_analysis"
+    `SELECT COUNT(*) as n FROM clawhub_skills s
+     WHERE EXISTS (SELECT 1 FROM clawhub_analysis ca WHERE ca.slug = s.slug)`
   );
   const avgOverall = await query<{ avg: number }>(
     `SELECT AVG(overall_composite) as avg FROM (
@@ -1324,5 +1326,6 @@ export async function getClawHubCatalogStats(): Promise<{
     avgOverallComposite: avgOverall[0]?.avg ?? 0,
     avgStaticComposite: avgStatic[0]?.avg ?? 0,
     withScripts: scripts[0]?.n ?? 0,
+    dbPath: dbPath(),
   };
 }

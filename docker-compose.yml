@@ -14,7 +14,7 @@ services:
     ports:
       - "3077:3077"
     environment:
-      CLAW_BENCH_DB: /data/bench.db
+      CLAW_BENCH_DB: /app/clawhub/bench.db
       # LLM analysis provider settings (used by `clawhub analyze --llm`)
       # CLAWHUB_LLM_PROVIDER: ollama
       # OLLAMA_HOST: http://host.docker.internal:11434   # Ollama running on host (Mac/Win)
@@ -29,7 +29,10 @@ services:
       # ANTHROPIC_API_KEY: your-key
       # ANTHROPIC_MODEL: claude-sonnet-4-20250514
     volumes:
-      - clawbench-data:/data
+      # Persist only SQLite; image keeps clawhub/skills-seed.json (see Dockerfile).
+      # If you used an older compose that mounted clawbench-data at /data, copy bench.db
+      # into a new volume or bind-mount: docker compose run --rm -v clawbench-data:/old ...
+      - clawbench-data:/app/clawhub/bench.db
     healthcheck:
       test:
         [

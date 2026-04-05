@@ -119,7 +119,7 @@ volumes:
   # - ./clawhub/skills-metadata.json:/app/clawhub/skills-metadata.json
 ```
 
-Plain **Docker** (no Compose): **`docker build -t claw-bench .`** then **`docker run -p 3077:3077 -v clawbench-data:/data claw-bench`**.
+Plain **Docker** (no Compose): **`docker build -t claw-bench .`** then **`docker run -p 3077:3077 -v clawbench-data:/app/clawhub/bench.db claw-bench`** (image default **`CLAW_BENCH_DB=/app/clawhub/bench.db`**).
 
 ### ClawHub: crawl, download, analyze
 
@@ -199,7 +199,7 @@ The same numbers are persisted on **each insert** into SQLite table **`clawhub_a
 | `file_stats_ms` | `collectFileStats` |
 | `pipeline_ms` | Entire `analyzeSkill()` run |
 
-Database file: **`CLAW_BENCH_DB`** (default **`~/.claw-bench/bench.db`**). Existing databases get these columns via migration on next open. The **ClawHub Catalog** dashboard shows pipeline timings, **source insights** (`analysis_insights`), and **imported metadata** (when `skill_name` matches the slug) on the skill detail page; the catalog table includes a **Pipeline** column. For ad hoc SQL: `SELECT slug, analyzed_at, extract_ms, pipeline_ms FROM clawhub_analysis ORDER BY id DESC LIMIT 20`.
+Database file: **`CLAW_BENCH_DB`** (default **`./clawhub/bench.db`** under the process working directory). Existing databases get these columns via migration on next open. The **ClawHub Catalog** dashboard shows pipeline timings, **source insights** (`analysis_insights`), and **imported metadata** (when `skill_name` matches the slug) on the skill detail page; the catalog table includes a **Pipeline** column. For ad hoc SQL: `SELECT slug, analyzed_at, extract_ms, pipeline_ms FROM clawhub_analysis ORDER BY id DESC LIMIT 20`.
 
 **Re-run / backfill timing and scores** — Each `clawhub analyze` **inserts a new row**; nothing is updated in place unless you pass **`--clean-all-analyses`** or **`--clean-model-analyses`**. The catalog and dashboard use the **latest row per skill** (by `analyzed_at`), so older rows (including those with `NULL` timing columns from before timing existed) are **ignored** for display once a newer analysis exists.
 
@@ -399,7 +399,7 @@ See **Skill metadata** under [ClawHub: crawl, download, analyze](#clawhub-crawl-
 |----------|-------------|---------|
 | `BENCH_EMBED_MODEL` | Default embedding model | `nomic-embed-text` |
 | `OLLAMA_HOST` | Ollama server URL | `http://localhost:11434` |
-| `CLAW_BENCH_DB` | SQLite database path | `~/.claw-bench/bench.db` |
+| `CLAW_BENCH_DB` | SQLite database path | `./clawhub/bench.db` (resolved from cwd) |
 | `CLAWHUB_DIR` | Absolute path to the `clawhub` folder (`zip/`, seed sibling layout); overrides DB-relative / cwd `./clawhub` | — |
 | `CLAWHUB_LLM_TIMEOUT_MS` | HTTP timeout per LLM request (`0` = none) | `120000` |
 | `CLAWHUB_LLM_SLOW_MS` | LLM phase ≥ this ms → `llm_outcome=slow` (`0` = off) | `120000` |
@@ -423,7 +423,7 @@ See **Skill metadata** under [ClawHub: crawl, download, analyze](#clawhub-crawl-
 | `CLAW_BENCH_DB_LOCK_STALE_MS` | Age after which a stale DB lock file is auto-removed | `21600000` (6h) |
 | `CLAW_BENCH_DB_LOCK_TIMEOUT_MS` | Max wait for DB lock (`0` = wait forever) | `0` |
 
-Local artifacts (`clawhub/zip/`, `clawhub-skills/`, `clawhub/skills-seed.json`, `clawhub/skills-metadata.json`, `bench.db`) are **not** meant to be committed—see `.gitignore`.
+Local artifacts (`clawhub/zip/`, `clawhub-skills/`, `clawhub/skills-seed.json`, `clawhub/skills-metadata.json`, `clawhub/bench.db`) are **not** meant to be committed—see `.gitignore`.
 
 ## Writing `bench.json`
 

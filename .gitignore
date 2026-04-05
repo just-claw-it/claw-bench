@@ -16,6 +16,7 @@ Thumbs.db
 *.tgz
 coverage/
 clawhub-skills/
+clawhub/bench.db
 clawhub/zip/
 # Crawled registry (can be large); Docker/README use empty `[]` or mount your own
 clawhub/skills-seed.json

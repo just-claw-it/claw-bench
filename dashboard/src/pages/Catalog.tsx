@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { useCatalog } from "../api";
+import { useCatalog, useCatalogStats } from "../api";
 import { type CatalogSkill, pct, scoreColor } from "../types";
 import ScoreBar from "../components/ScoreBar";
 import { LlmBreakdownInline, parseLlmModelsJson } from "../components/LlmMultiModelHint";
@@ -28,6 +28,7 @@ export default function Catalog() {
     setPage(1);
   }, [debouncedQ, sortKey, filterAnalyzed, filterScripts, pageSize]);
 
+  const { data: catalogStats } = useCatalogStats();
   const { data, isLoading, error } = useCatalog({
     page,
     limit: pageSize,
@@ -81,6 +82,12 @@ export default function Catalog() {
           {rangeLabel}
           {isLoading ? <span className="ml-2 text-slate-400">(updating…)</span> : null}
         </p>
+        <p
+          className="text-xs text-slate-500 dark:text-slate-500 mt-2 font-mono break-all"
+          title="Set CLAW_BENCH_DB to the same file you used for clawhub analyze / crawl."
+        >
+          SQLite: {catalogStats?.dbPath ?? "—"}
+        </p>
       </div>
 
       {totalPages > 1 && (
@@ -114,7 +121,10 @@ export default function Catalog() {
           <option value="name">Sort: Name</option>
         </select>
 
-        <label className="flex items-center gap-1.5 text-sm text-slate-600 dark:text-slate-400">
+        <label
+          className="flex items-center gap-1.5 text-sm text-slate-600 dark:text-slate-400 cursor-pointer"
+          title="Only skills that have at least one clawhub_analysis row in this database. The list is still paginated (see “Per page” and page controls); the subtitle shows total matches, e.g. 1–50 of 40,000."
+        >
           <input
             type="checkbox"
             checked={filterAnalyzed}

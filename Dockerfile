@@ -20,8 +20,8 @@ FROM node:20-alpine AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
-# Persist SQLite + optional zips/skills on a volume
-ENV CLAW_BENCH_DB=/data/bench.db
+# Same default layout as local dev (cwd/clawhub/bench.db → /app/clawhub/bench.db)
+ENV CLAW_BENCH_DB=/app/clawhub/bench.db
 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
@@ -33,7 +33,7 @@ COPY --from=builder /app/dashboard/dist ./dashboard/dist
 RUN mkdir -p clawhub && printf '%s\n' '[]' > clawhub/skills-seed.json
 
 EXPOSE 3077
-VOLUME ["/data"]
+# Mount a named volume or bind at this path in Compose / docker run (see README).
 
 ENTRYPOINT ["node", "dist/cli.js"]
 CMD ["dashboard", "--port", "3077"]

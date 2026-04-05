@@ -184,4 +184,6 @@ export interface CatalogStats {
   avgOverallComposite: number;
   avgStaticComposite: number;
   withScripts: number;
+  /** Resolved SQLite path (same as server `CLAW_BENCH_DB` or default). */
+  dbPath: string;
 }
