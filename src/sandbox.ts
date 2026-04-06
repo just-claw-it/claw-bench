@@ -103,6 +103,8 @@ export async function runSkillDocker(
   fs.writeFileSync(payloadPath, JSON.stringify(payload), "utf8");
   const skillHost = path.resolve(skillDir);
   const runnerPath = sandboxRunnerPath();
+  /** Whole dist dir: sandbox-runner.js requires sibling skill-invoke.js, harness-inputs.js, etc. */
+  const distDir = path.dirname(runnerPath);
   const image =
     process.env.CLAW_BENCH_SANDBOX_IMAGE?.trim() || "node:20-bookworm-slim";
   const extra =
@@ -116,14 +118,14 @@ export async function runSkillDocker(
     "-v",
     `${payloadPath}:/payload.json:ro`,
     "-v",
-    `${runnerPath}:/runner.cjs:ro`,
+    `${distDir}:/claw-bench-dist:ro`,
     "-w",
     "/skill",
   ];
   if (extra) {
     args.push(...extra.split(/\s+/).filter(Boolean));
   }
-  args.push(image, "node", "/runner.cjs", "/payload.json");
+  args.push(image, "node", "/claw-bench-dist/sandbox-runner.js", "/payload.json");
 
   try {
     const child = spawn("docker", args, {
