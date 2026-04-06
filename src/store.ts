@@ -1351,28 +1351,56 @@ function clawhubCatalogSelectSql(): string {
        latest.llm_outcome AS llm_outcome`;
 }
 
+/** Catalog list sort field (see dashboard table headers + API `sort` query). */
+export type ClawHubCatalogSortKey =
+  | "overall"
+  | "name"
+  | "author"
+  | "downloads"
+  | "stars"
+  | "static"
+  | "llm"
+  | "pipeline";
+
 export interface ClawHubCatalogPageOpts {
   page: number;
   limit: number;
-  sort: "overall" | "name" | "downloads" | "stars";
+  sort: ClawHubCatalogSortKey;
+  /** Default `desc` for scores/metrics, callers may pass `asc` for name/author-first sorts. */
+  sortDir?: "asc" | "desc";
   q?: string;
   analyzedOnly?: boolean;
   withScripts?: boolean;
 }
 
-function catalogOrderBy(sort: ClawHubCatalogPageOpts["sort"]): string {
+function catalogOrderBy(
+  sort: ClawHubCatalogSortKey,
+  sortDir: "asc" | "desc"
+): string {
   const overall = clawhubOverallCompositeSqlExpr();
+  const d = sortDir === "asc" ? "ASC" : "DESC";
+  const slugTie = "s.slug ASC";
+  const nullsLastScore = (expr: string) =>
+    `CASE WHEN (${expr}) IS NULL THEN 1 ELSE 0 END ASC, (${expr}) ${d}, ${slugTie}`;
+  const nullsLastOverall = nullsLastScore(overall);
+
   switch (sort) {
     case "name":
-      return "s.name COLLATE NOCASE ASC";
+      return `s.name COLLATE NOCASE ${d}, ${slugTie}`;
+    case "author":
+      return `s.author COLLATE NOCASE ${d}, ${slugTie}`;
     case "downloads":
-      return "s.downloads DESC";
+      return `s.downloads ${d}, ${slugTie}`;
     case "stars":
-      return "s.stars DESC";
+      return `s.stars ${d}, ${slugTie}`;
+    case "static":
+      return nullsLastScore("latest.static_composite");
+    case "llm":
+      return nullsLastScore("llm.llm_composite");
+    case "pipeline":
+      return nullsLastScore("latest.pipeline_ms");
     default:
-      return `CASE WHEN (${overall}) IS NULL THEN 1 ELSE 0 END,
-              (${overall}) DESC,
-              s.slug ASC`;
+      return nullsLastOverall;
   }
 }
 
@@ -1430,7 +1458,8 @@ export function getClawHubSkillsPagedOnDb(
   }
 
   const whereSql = conditions.join(" AND ");
-  const orderSql = catalogOrderBy(opts.sort);
+  const dir = opts.sortDir ?? "desc";
+  const orderSql = catalogOrderBy(opts.sort, dir);
 
   const joinSql = clawhubCatalogAnalysisJoinSql();
   const countJoinSql = clawhubCatalogCountJoinSql();

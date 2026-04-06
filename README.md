@@ -537,9 +537,6 @@ npm run build
 npm test
 ```
 
-`dist/` is not committed; run `npm run build` after pulling. Dashboard: `npm run dashboard:install` and `npm run dashboard:build`. Tests: **`npm test`** runs the Node suite plus **Vitest** for the dashboard UI (requires `npm run dashboard:install` first). Use **`npm run test:run`** for Node-only tests after a build, or **`npm run dashboard:test`** for dashboard tests only. Set **`CLAWHUB_SKIP_NETWORK_SMOKE=1`** to skip the optional Convex smoke test (`data sync-clawhub-metadata` dry-run) when offline.
-
-**Before committing** (recommended): **`npm run build`**, then **`npm run test:run`** and **`npm run dashboard:test`** (or **`npm test`** for the full suite). Root **`dist/`** and **`dashboard/dist/`** are gitignored — production images / releases run **`npm run dashboard:build`** as part of the build.
 
 ## License
 

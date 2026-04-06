@@ -65,10 +65,23 @@ export function useCompare(skills: string[]) {
 
 // ── Catalog hooks ────────────────────────────────────────────────────────
 
+/** Matches server `sort` query (see `ClawHubCatalogSortKey` in store). */
+export type CatalogSortKey =
+  | "overall"
+  | "name"
+  | "author"
+  | "downloads"
+  | "stars"
+  | "static"
+  | "llm"
+  | "pipeline";
+
 export interface UseCatalogOpts {
   page?: number;
   limit?: number;
-  sort?: "overall" | "name" | "downloads" | "stars";
+  sort?: CatalogSortKey;
+  /** Server `dir` query; default `desc` (scores/metrics); use `asc` for name/author-first. */
+  sortDir?: "asc" | "desc";
   q?: string;
   analyzedOnly?: boolean;
   withScripts?: boolean;
@@ -81,6 +94,7 @@ function normalizedCatalogOpts(opts: UseCatalogOpts) {
     page: opts.page ?? 1,
     limit: opts.limit ?? 50,
     sort: opts.sort ?? "overall",
+    sortDir: opts.sortDir ?? "desc",
     q: opts.q ?? "",
     analyzedOnly: opts.analyzedOnly ?? false,
     withScripts: opts.withScripts ?? false,
@@ -90,12 +104,13 @@ function normalizedCatalogOpts(opts: UseCatalogOpts) {
 
 /** Plain fetch for prefetching / tooling. */
 export async function fetchCatalogPage(opts: UseCatalogOpts = {}): Promise<CatalogPage> {
-  const { page, limit, sort, q, analyzedOnly, withScripts, includeStats } =
+  const { page, limit, sort, sortDir, q, analyzedOnly, withScripts, includeStats } =
     normalizedCatalogOpts(opts);
   const sp = new URLSearchParams();
   sp.set("page", String(page));
   sp.set("limit", String(limit));
   sp.set("sort", sort);
+  sp.set("dir", sortDir);
   if (q.trim()) sp.set("q", q.trim());
   if (analyzedOnly) sp.set("analyzed", "1");
   if (withScripts) sp.set("scripts", "1");
@@ -104,7 +119,7 @@ export async function fetchCatalogPage(opts: UseCatalogOpts = {}): Promise<Catal
 }
 
 export function catalogListQueryOptions(opts: UseCatalogOpts = {}) {
-  const { page, limit, sort, q, analyzedOnly, withScripts, includeStats } =
+  const { page, limit, sort, sortDir, q, analyzedOnly, withScripts, includeStats } =
     normalizedCatalogOpts(opts);
   return {
     queryKey: [
@@ -112,17 +127,19 @@ export function catalogListQueryOptions(opts: UseCatalogOpts = {}) {
       page,
       limit,
       sort,
+      sortDir,
       q,
       analyzedOnly,
       withScripts,
       includeStats,
     ] as const,
     queryFn: () => fetchCatalogPage(opts),
-    staleTime: 60_000,
+    /** Local bench catalog — avoid refetching on every tab focus (each page is a heavy SQLite pass). */
+    staleTime: 120_000,
   };
 }
 
-/** Warm next/prev pages so pagination often hits the React Query cache. */
+/** Warm the next page only (one extra request vs two) so pagination stays snappy without tripling DB load. */
 export function prefetchCatalogNeighbors(
   qc: QueryClient,
   opts: UseCatalogOpts & { totalPages: number }
@@ -134,15 +151,13 @@ export function prefetchCatalogNeighbors(
   if (page < totalPages) {
     void qc.prefetchQuery(catalogListQueryOptions({ ...prefetchOpts, page: page + 1 }));
   }
-  if (page > 1) {
-    void qc.prefetchQuery(catalogListQueryOptions({ ...prefetchOpts, page: page - 1 }));
-  }
 }
 
 export function useCatalog(opts: UseCatalogOpts = {}) {
   return useQuery<CatalogPage>({
     ...catalogListQueryOptions(opts),
     placeholderData: keepPreviousData,
+    refetchOnWindowFocus: false,
   });
 }
 

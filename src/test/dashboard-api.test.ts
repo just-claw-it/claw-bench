@@ -264,6 +264,29 @@ describe("dashboard catalog API contract", () => {
     }
   });
 
+  it("GET /api/catalog accepts sort + dir (e.g. author asc)", async () => {
+    const { createDashboardApp } = await import("../server.js");
+    const app = createDashboardApp();
+    const server = http.createServer(app);
+
+    await new Promise<void>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+      server.on("error", reject);
+    });
+
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:${port}/api/catalog?page=1&limit=10&sort=author&dir=asc`
+      );
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as Record<string, unknown>;
+      assert.ok(Array.isArray(body.skills));
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   it("GET /api/catalog/stats returns global catalog statistics", async () => {
     const { createDashboardApp } = await import("../server.js");
     const app = createDashboardApp();

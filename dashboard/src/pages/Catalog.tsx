@@ -1,21 +1,30 @@
 import { useState, useMemo, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useCatalog, useCatalogStats, prefetchCatalogNeighbors } from "../api";
+import {
+  useCatalog,
+  useCatalogStats,
+  prefetchCatalogNeighbors,
+  type CatalogSortKey,
+} from "../api";
 import { type CatalogSkill, pct, scoreColor } from "../types";
 import ScoreBar from "../components/ScoreBar";
 import { LlmBreakdownInline, parseLlmModelsJson } from "../components/LlmMultiModelHint";
 
-type SortKey = "overall" | "name" | "downloads" | "stars";
 type ViewMode = "table" | "grid";
 
 const PAGE_SIZES = [10, 50, 100] as const;
+
+function defaultSortDirForColumn(k: CatalogSortKey): "asc" | "desc" {
+  return k === "name" || k === "author" ? "asc" : "desc";
+}
 
 export default function Catalog() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(50);
   const [searchInput, setSearchInput] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
-  const [sortKey, setSortKey] = useState<SortKey>("overall");
+  const [sortKey, setSortKey] = useState<CatalogSortKey>("overall");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [view, setView] = useState<ViewMode>("grid");
   const [filterAnalyzed, setFilterAnalyzed] = useState(false);
   const [filterScripts, setFilterScripts] = useState(false);
@@ -27,13 +36,14 @@ export default function Catalog() {
 
   useEffect(() => {
     setPage(1);
-  }, [debouncedQ, sortKey, filterAnalyzed, filterScripts, pageSize]);
+  }, [debouncedQ, sortKey, sortDir, filterAnalyzed, filterScripts, pageSize]);
 
   const queryClient = useQueryClient();
-  const { data, isLoading, error, isFetching, isPlaceholderData } = useCatalog({
+  const { data, isPending, error, isFetching, isPlaceholderData } = useCatalog({
     page,
     limit: pageSize,
     sort: sortKey,
+    sortDir,
     q: debouncedQ,
     analyzedOnly: filterAnalyzed,
     withScripts: filterScripts,
@@ -48,16 +58,20 @@ export default function Catalog() {
 
   useEffect(() => {
     if (!data || totalPages <= 1) return;
-    prefetchCatalogNeighbors(queryClient, {
-      page,
-      totalPages,
-      limit: pageSize,
-      sort: sortKey,
-      q: debouncedQ,
-      analyzedOnly: filterAnalyzed,
-      withScripts: filterScripts,
-      includeStats: false,
-    });
+    const t = window.setTimeout(() => {
+      prefetchCatalogNeighbors(queryClient, {
+        page,
+        totalPages,
+        limit: pageSize,
+        sort: sortKey,
+        sortDir,
+        q: debouncedQ,
+        analyzedOnly: filterAnalyzed,
+        withScripts: filterScripts,
+        includeStats: false,
+      });
+    }, 450);
+    return () => clearTimeout(t);
   }, [
     queryClient,
     data,
@@ -65,10 +79,20 @@ export default function Catalog() {
     totalPages,
     pageSize,
     sortKey,
+    sortDir,
     debouncedQ,
     filterAnalyzed,
     filterScripts,
   ]);
+
+  const handleSortColumn = (column: CatalogSortKey) => {
+    if (column === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(column);
+      setSortDir(defaultSortDirForColumn(column));
+    }
+  };
 
   const rangeLabel = useMemo(() => {
     if (total === 0) return "0 results";
@@ -76,14 +100,6 @@ export default function Catalog() {
     const end = Math.min(page * limit, total);
     return `${start.toLocaleString()}–${end.toLocaleString()} of ${total.toLocaleString()}`;
   }, [page, limit, total]);
-
-  if (isLoading && !data) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <p className="text-slate-400 animate-pulse">Loading catalog...</p>
-      </div>
-    );
-  }
 
   if (error) {
     return (
@@ -99,6 +115,18 @@ export default function Catalog() {
     );
   }
 
+  if (isPending) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 gap-3">
+        <span
+          className="inline-block size-8 rounded-full border-2 border-slate-300 border-t-blue-500 animate-spin dark:border-slate-600 dark:border-t-blue-400"
+          aria-hidden
+        />
+        <p className="text-slate-400 animate-pulse">Loading catalog…</p>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <div>
@@ -107,8 +135,14 @@ export default function Catalog() {
         </h2>
         <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
           {rangeLabel}
-          {isFetching && !isPlaceholderData ? (
-            <span className="ml-2 text-slate-400">(updating…)</span>
+          {isFetching ? (
+            <span className="ml-2 inline-flex items-center gap-1.5 text-slate-400">
+              <span
+                className="inline-block size-2 animate-pulse rounded-full bg-slate-400"
+                aria-hidden
+              />
+              {isPlaceholderData ? "Updating…" : "Loading…"}
+            </span>
           ) : null}
         </p>
         <p
@@ -123,8 +157,10 @@ export default function Catalog() {
         <CatalogPaginationBar
           page={page}
           totalPages={totalPages}
+          onFirst={() => setPage(1)}
           onPrev={() => setPage((p) => Math.max(1, p - 1))}
           onNext={() => setPage((p) => Math.min(totalPages, p + 1))}
+          onLast={() => setPage(totalPages)}
           className="pb-4 border-b border-slate-200 dark:border-slate-800"
         />
       )}
@@ -141,13 +177,21 @@ export default function Catalog() {
 
         <select
           value={sortKey}
-          onChange={(e) => setSortKey(e.target.value as SortKey)}
+          onChange={(e) => {
+            const k = e.target.value as CatalogSortKey;
+            setSortKey(k);
+            setSortDir(defaultSortDirForColumn(k));
+          }}
           className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm text-slate-900 dark:text-slate-100"
         >
-          <option value="overall">Sort: Score</option>
+          <option value="overall">Sort: Overall</option>
+          <option value="static">Sort: Static</option>
+          <option value="llm">Sort: LLM</option>
+          <option value="pipeline">Sort: Pipeline</option>
           <option value="downloads">Sort: Downloads</option>
           <option value="stars">Sort: Stars</option>
           <option value="name">Sort: Name</option>
+          <option value="author">Sort: Author</option>
         </select>
 
         <label
@@ -207,17 +251,28 @@ export default function Catalog() {
       </div>
 
       {/* Content */}
-      {view === "grid" ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {skills.map((skill) => (
-            <SkillCard key={skill.slug} skill={skill} />
-          ))}
-        </div>
-      ) : (
-        <SkillTable skills={skills} startIndex={(page - 1) * limit} />
-      )}
+      <div
+        className={`transition-opacity duration-200 ${isFetching ? "opacity-60" : "opacity-100"}`}
+        aria-busy={isFetching}
+      >
+        {view === "grid" ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {skills.map((skill) => (
+              <SkillCard key={skill.slug} skill={skill} />
+            ))}
+          </div>
+        ) : (
+          <SkillTable
+            skills={skills}
+            startIndex={(page - 1) * limit}
+            sortKey={sortKey}
+            sortDir={sortDir}
+            onSortColumn={handleSortColumn}
+          />
+        )}
+      </div>
 
-      {skills.length === 0 && !isLoading && (
+      {skills.length === 0 && !isFetching && (
         <div className="text-center py-16 text-slate-400">
           No skills match your filters.
         </div>
@@ -227,8 +282,10 @@ export default function Catalog() {
         <CatalogPaginationBar
           page={page}
           totalPages={totalPages}
+          onFirst={() => setPage(1)}
           onPrev={() => setPage((p) => Math.max(1, p - 1))}
           onNext={() => setPage((p) => Math.min(totalPages, p + 1))}
+          onLast={() => setPage(totalPages)}
           className="pt-4 border-t border-slate-200 dark:border-slate-800"
         />
       )}
@@ -236,17 +293,24 @@ export default function Catalog() {
   );
 }
 
+const paginationBtnClass =
+  "px-3 sm:px-4 py-2 rounded-lg text-sm font-medium border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800";
+
 function CatalogPaginationBar({
   page,
   totalPages,
+  onFirst,
   onPrev,
   onNext,
+  onLast,
   className = "",
 }: {
   page: number;
   totalPages: number;
+  onFirst: () => void;
   onPrev: () => void;
   onNext: () => void;
+  onLast: () => void;
   className?: string;
 }) {
   return (
@@ -256,8 +320,16 @@ function CatalogPaginationBar({
       <button
         type="button"
         disabled={page <= 1}
+        onClick={onFirst}
+        className={paginationBtnClass}
+      >
+        First
+      </button>
+      <button
+        type="button"
+        disabled={page <= 1}
         onClick={onPrev}
-        className="px-4 py-2 rounded-lg text-sm font-medium border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800"
+        className={paginationBtnClass}
       >
         Previous
       </button>
@@ -268,9 +340,17 @@ function CatalogPaginationBar({
         type="button"
         disabled={page >= totalPages}
         onClick={onNext}
-        className="px-4 py-2 rounded-lg text-sm font-medium border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed hover:bg-slate-50 dark:hover:bg-slate-800"
+        className={paginationBtnClass}
       >
         Next
+      </button>
+      <button
+        type="button"
+        disabled={page >= totalPages}
+        onClick={onLast}
+        className={paginationBtnClass}
+      >
+        Last
       </button>
     </div>
   );
@@ -364,12 +444,51 @@ function SkillCard({ skill }: { skill: CatalogSkill }) {
   );
 }
 
+function CatalogSortTh({
+  label,
+  column,
+  activeKey,
+  dir,
+  onSort,
+  title,
+}: {
+  label: string;
+  column: CatalogSortKey;
+  activeKey: CatalogSortKey;
+  dir: "asc" | "desc";
+  onSort: (k: CatalogSortKey) => void;
+  title?: string;
+}) {
+  const active = activeKey === column;
+  return (
+    <th className="px-4 py-2 text-left text-xs font-medium text-slate-500 uppercase">
+      <button
+        type="button"
+        onClick={() => onSort(column)}
+        title={title}
+        className={`inline-flex items-center gap-1 -mx-1 px-1 rounded hover:text-slate-700 dark:hover:text-slate-300 ${
+          active ? "text-slate-800 dark:text-slate-200 font-semibold" : ""
+        }`}
+      >
+        {label}
+        {active ? <span aria-hidden>{dir === "asc" ? "↑" : "↓"}</span> : null}
+      </button>
+    </th>
+  );
+}
+
 function SkillTable({
   skills,
   startIndex = 0,
+  sortKey,
+  sortDir,
+  onSortColumn,
 }: {
   skills: CatalogSkill[];
   startIndex?: number;
+  sortKey: CatalogSortKey;
+  sortDir: "asc" | "desc";
+  onSortColumn: (k: CatalogSortKey) => void;
 }) {
   return (
     <div className="rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
@@ -377,16 +496,63 @@ function SkillTable({
         <thead className="bg-slate-100 dark:bg-slate-800/50">
           <tr>
             <th className="px-4 py-2 text-left text-xs font-medium text-slate-500 uppercase">#</th>
-            <th className="px-4 py-2 text-left text-xs font-medium text-slate-500 uppercase">Skill</th>
-            <th className="px-4 py-2 text-left text-xs font-medium text-slate-500 uppercase">Author</th>
-            <th className="px-4 py-2 text-left text-xs font-medium text-slate-500 uppercase">Downloads</th>
-            <th className="px-4 py-2 text-left text-xs font-medium text-slate-500 uppercase">Stars</th>
-            <th className="px-4 py-2 text-left text-xs font-medium text-slate-500 uppercase">Static</th>
-            <th className="px-4 py-2 text-left text-xs font-medium text-slate-500 uppercase">LLM</th>
-            <th className="px-4 py-2 text-left text-xs font-medium text-slate-500 uppercase">Overall</th>
-            <th className="px-4 py-2 text-left text-xs font-medium text-slate-500 uppercase" title="Wall time from latest analyze run">
-              Pipeline
-            </th>
+            <CatalogSortTh
+              label="Skill"
+              column="name"
+              activeKey={sortKey}
+              dir={sortDir}
+              onSort={onSortColumn}
+            />
+            <CatalogSortTh
+              label="Author"
+              column="author"
+              activeKey={sortKey}
+              dir={sortDir}
+              onSort={onSortColumn}
+            />
+            <CatalogSortTh
+              label="Downloads"
+              column="downloads"
+              activeKey={sortKey}
+              dir={sortDir}
+              onSort={onSortColumn}
+            />
+            <CatalogSortTh
+              label="Stars"
+              column="stars"
+              activeKey={sortKey}
+              dir={sortDir}
+              onSort={onSortColumn}
+            />
+            <CatalogSortTh
+              label="Static"
+              column="static"
+              activeKey={sortKey}
+              dir={sortDir}
+              onSort={onSortColumn}
+            />
+            <CatalogSortTh
+              label="LLM"
+              column="llm"
+              activeKey={sortKey}
+              dir={sortDir}
+              onSort={onSortColumn}
+            />
+            <CatalogSortTh
+              label="Overall"
+              column="overall"
+              activeKey={sortKey}
+              dir={sortDir}
+              onSort={onSortColumn}
+            />
+            <CatalogSortTh
+              label="Pipeline"
+              column="pipeline"
+              activeKey={sortKey}
+              dir={sortDir}
+              onSort={onSortColumn}
+              title="Wall time from latest analyze run"
+            />
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-200 dark:divide-slate-800">

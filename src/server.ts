@@ -13,6 +13,7 @@ import {
   getClawHubCatalogStatsOnDb,
   getClawHubCatalogPeekTopOnDb,
   getClawHubSkillsPagedOnDb,
+  type ClawHubCatalogSortKey,
 } from "./store.js";
 import { runsVisibilitySql, hideExampleRunsFromDashboard, isTestRunRow } from "./dashboardFilters.js";
 import {
@@ -21,6 +22,27 @@ import {
   allDrift,
 } from "./analyze.js";
 import { BenchmarkReport } from "./types.js";
+
+function parseCatalogSortQuery(req: Request): {
+  sort: ClawHubCatalogSortKey;
+  sortDir: "asc" | "desc";
+} {
+  const sortRaw = String(req.query.sort ?? "overall");
+  const sort: ClawHubCatalogSortKey =
+    sortRaw === "overall" ||
+    sortRaw === "name" ||
+    sortRaw === "author" ||
+    sortRaw === "downloads" ||
+    sortRaw === "stars" ||
+    sortRaw === "static" ||
+    sortRaw === "llm" ||
+    sortRaw === "pipeline"
+      ? sortRaw
+      : "overall";
+  const dirRaw = String(req.query.dir ?? "desc").toLowerCase();
+  const sortDir: "asc" | "desc" = dirRaw === "asc" ? "asc" : "desc";
+  return { sort, sortDir };
+}
 
 function listFilesRecursive(dir: string, baseDir: string): string[] {
   const results: string[] = [];
@@ -406,13 +428,7 @@ export function createDashboardApp(): Application {
         200,
         Math.max(1, parseInt(String(req.query.limit ?? "50"), 10) || 50)
       );
-      const sortRaw = String(req.query.sort ?? "overall");
-      const sort =
-        sortRaw === "name" ||
-        sortRaw === "downloads" ||
-        sortRaw === "stars"
-          ? sortRaw
-          : "overall";
+      const { sort, sortDir } = parseCatalogSortQuery(req);
       const q = String(req.query.q ?? "").trim();
       const analyzedOnly =
         req.query.analyzed === "1" || req.query.analyzed === "true";
@@ -444,7 +460,8 @@ export function createDashboardApp(): Application {
           const { rows, total } = getClawHubSkillsPagedOnDb(db, {
             page,
             limit,
-            sort: sort as "overall" | "name" | "downloads" | "stars",
+            sort,
+            sortDir,
             q: q || undefined,
             analyzedOnly,
             withScripts,
@@ -467,7 +484,8 @@ export function createDashboardApp(): Application {
       const { rows, total } = await getClawHubSkillsPaged({
         page,
         limit,
-        sort: sort as "overall" | "name" | "downloads" | "stars",
+        sort,
+        sortDir,
         q: q || undefined,
         analyzedOnly,
         withScripts,
