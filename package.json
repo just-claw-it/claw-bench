@@ -29,7 +29,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/cli.js",
-    "test:run": "node --test dist/test/bench.test.js dist/test/clawhub-scoring.test.js dist/test/clawhub-analyzer.test.js dist/test/store-clawhub.test.js dist/test/dashboard-api.test.js dist/test/cli-clawhub-smoke.test.js dist/test/clawhub-metadata-collector.test.js dist/test/cli-sync-metadata-smoke.test.js",
+    "test:run": "node --test dist/test/bench.test.js dist/test/sandbox.test.js dist/test/clawhub-scoring.test.js dist/test/clawhub-analyzer.test.js dist/test/store-clawhub.test.js dist/test/dashboard-api.test.js dist/test/cli-clawhub-smoke.test.js dist/test/clawhub-metadata-collector.test.js dist/test/cli-sync-metadata-smoke.test.js",
     "dashboard:test": "npm run test --prefix dashboard",
     "test": "npm run build && npm run test:run && npm run dashboard:test",
     "prepublishOnly": "npm run build",

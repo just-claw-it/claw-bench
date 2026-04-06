@@ -1,10 +1,15 @@
 // ── Core config ────────────────────────────────────────────────────────────
 
+/** How each skill invocation runs: in-process (default), isolated subprocess, or Docker. */
+export type BenchSandboxMode = "none" | "subprocess" | "docker";
+
 export interface BenchConfig {
   embedModel: string;       // default: nomic-embed-text
   consistencyRuns: number;  // default: 5
   consistencyThreshold: number; // default: 0.92 (calibrated for nomic-embed-text)
   latencyThresholdMs: number;   // default: 5000
+  /** Where skill entrypoint code executes (default: in-process). */
+  sandbox?: BenchSandboxMode;
 }
 
 export const DEFAULT_CONFIG: BenchConfig = {

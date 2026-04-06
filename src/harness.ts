@@ -1,13 +1,10 @@
 import * as fs from "fs";
 import * as path from "path";
 import { z } from "zod";
-import {
-  BenchConfig,
-  BenchJson,
-  MockWebhookPayload,
-  MockCronTrigger,
-  SkillManifest,
-} from "./types.js";
+import { BenchConfig, BenchJson, BenchSandboxMode, SkillManifest } from "./types.js";
+import { mockWebhookPayload, mockCronTrigger, shapeInput } from "./harness-inputs.js";
+import { invokeSkillEntrypoint, type RunResult } from "./skill-invoke.js";
+import { runSkillDocker, runSkillSubprocess } from "./sandbox.js";
 
 const SkillManifestSchema = z.object({
   name: z.string(),
@@ -19,11 +16,13 @@ const SkillManifestSchema = z.object({
 
 const BenchJsonSchema = z.object({
   skillName: z.string(),
-  pairs: z.array(z.object({
-    description: z.string(),
-    input: z.record(z.unknown()),
-    expectedOutput: z.record(z.unknown()),
-  })),
+  pairs: z.array(
+    z.object({
+      description: z.string(),
+      input: z.record(z.unknown()),
+      expectedOutput: z.record(z.unknown()),
+    })
+  ),
 });
 
 // ── Credential detection ───────────────────────────────────────────────────
@@ -42,7 +41,6 @@ const CREDENTIAL_SUFFIXES = [
 ];
 
 const CREDENTIAL_USAGE_PATTERNS = [
-  // Authorization header (dot or bracket notation) + process.env on same line
   /Authorization[^\n]*process\.env/i,
   /(?:apiKey|api_key|authToken|auth_token|bearerToken|bearer_token|clientSecret|client_secret)\s*[:=]\s*process\.env/i,
   /apiKey\s*:\s*process\.env\.[A-Z_]+/,
@@ -70,7 +68,6 @@ export function requiresCredentials(
   skillDir: string,
   manifest?: SkillManifest
 ): boolean {
-  // Explicit author declaration wins
   if (manifest?.credentialVars !== undefined) {
     return manifest.credentialVars.length > 0;
   }
@@ -120,86 +117,31 @@ export function loadBenchJson(skillDir: string): BenchJson | null {
   return result.data;
 }
 
-// ── Mock payload factories ─────────────────────────────────────────────────
-
-export function mockWebhookPayload(
-  overrides: Partial<MockWebhookPayload> = {}
-): MockWebhookPayload {
-  return {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "user-agent": "claw-bench/0.1.0",
-      "x-request-id": "bench-00000000",
-    },
-    body: { event: "benchmark.probe", data: { value: "test" } },
-    query: {},
-    params: {},
-    ...overrides,
-  };
-}
-
-export function mockCronTrigger(
-  overrides: Partial<MockCronTrigger> = {}
-): MockCronTrigger {
-  return {
-    scheduledTime: new Date().toISOString(),
-    cronExpression: "0 9 * * 1-5",
-    timezone: "UTC",
-    jobName: "benchmark-probe",
-    ...overrides,
-  };
-}
+// Re-export for tests and callers that imported mocks from harness.
+export { mockWebhookPayload, mockCronTrigger, shapeInput };
 
 // ── Skill executor ─────────────────────────────────────────────────────────
 
-export interface RunResult {
-  output: Record<string, unknown> | null;
-  durationMs: number;
-  error: string | null;
-  crashed: boolean;
-}
+export type { RunResult };
 
-function shapeInput(
-  type: SkillManifest["type"],
-  input: Record<string, unknown>
-): Record<string, unknown> {
-  if (type === "webhook") {
-    if ("method" in input && "body" in input) return input;
-    return mockWebhookPayload({ body: input }) as unknown as Record<string, unknown>;
-  }
-  if (type === "cron") {
-    if ("cronExpression" in input) return input;
-    return mockCronTrigger() as unknown as Record<string, unknown>;
-  }
-  return input;
+function resolveSandbox(mode: BenchSandboxMode | undefined): BenchSandboxMode {
+  return mode ?? "none";
 }
 
 export async function runSkill(
   skillDir: string,
   manifest: SkillManifest,
-  input: Record<string, unknown>
+  input: Record<string, unknown>,
+  sandbox?: BenchSandboxMode
 ): Promise<RunResult> {
-  const entrypoint = path.resolve(skillDir, manifest.entrypoint);
-  const start = performance.now();
-  const runtimeInput = shapeInput(manifest.type, input);
-  try {
-    const mod = (await import(entrypoint)) as {
-      default: (input: Record<string, unknown>) => Promise<Record<string, unknown>>;
-    };
-    if (typeof mod.default !== "function") {
-      throw new Error("Skill entrypoint does not export a default function");
-    }
-    const output = await mod.default(runtimeInput);
-    return { output, durationMs: performance.now() - start, error: null, crashed: false };
-  } catch (err) {
-    return {
-      output: null,
-      durationMs: performance.now() - start,
-      error: err instanceof Error ? err.message : String(err),
-      crashed: true,
-    };
+  const mode = resolveSandbox(sandbox);
+  if (mode === "subprocess") {
+    return runSkillSubprocess(skillDir, manifest, input);
   }
+  if (mode === "docker") {
+    return runSkillDocker(skillDir, manifest, input);
+  }
+  return invokeSkillEntrypoint(skillDir, manifest, input);
 }
 
 // ── Synthetic malformed inputs ─────────────────────────────────────────────
@@ -221,18 +163,27 @@ export function syntheticMalformedInputs(
   if (type === "webhook") {
     return [
       ...base,
-      { headers: {}, body: {}, query: {}, params: {} },           // missing method
-      mockWebhookPayload({ body: null as unknown as Record<string, unknown> }) as unknown as Record<string, unknown>,
+      { headers: {}, body: {}, query: {}, params: {} },
+      mockWebhookPayload({
+        body: null as unknown as Record<string, unknown>,
+      }) as unknown as Record<string, unknown>,
       mockWebhookPayload({ method: "INVALID" as "POST" }) as unknown as Record<string, unknown>,
-      mockWebhookPayload({ body: { payload: Array(5000).fill("x").join("") } }) as unknown as Record<string, unknown>,
+      mockWebhookPayload({
+        body: { payload: Array(5000).fill("x").join("") },
+      }) as unknown as Record<string, unknown>,
     ];
   }
 
   if (type === "cron") {
     return [
       ...base,
-      { scheduledTime: new Date().toISOString(), cronExpression: "not-a-cron", timezone: "UTC", jobName: "test" },
-      { cronExpression: "0 9 * * *", timezone: "UTC", jobName: "test" }, // missing scheduledTime
+      {
+        scheduledTime: new Date().toISOString(),
+        cronExpression: "not-a-cron",
+        timezone: "UTC",
+        jobName: "test",
+      },
+      { cronExpression: "0 9 * * *", timezone: "UTC", jobName: "test" },
       mockCronTrigger({ timezone: "Mars/Olympus" }) as unknown as Record<string, unknown>,
     ];
   }
@@ -246,7 +197,7 @@ export async function collectConsistencyOutputs(
   skillDir: string,
   manifest: SkillManifest,
   benchJson: BenchJson | null,
-  runs: number
+  config: BenchConfig
 ): Promise<string[]> {
   let input: Record<string, unknown>;
   if (benchJson?.pairs[0]?.input) {
@@ -259,9 +210,11 @@ export async function collectConsistencyOutputs(
     input = { input: "benchmark-consistency-probe" };
   }
 
+  const runs = config.consistencyRuns;
+  const sandbox = config.sandbox;
   const outputs: string[] = [];
   for (let i = 0; i < runs; i++) {
-    const result = await runSkill(skillDir, manifest, input);
+    const result = await runSkill(skillDir, manifest, input, sandbox);
     outputs.push(
       result.output !== null ? JSON.stringify(result.output) : result.error ?? "crash"
     );

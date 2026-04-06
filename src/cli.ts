@@ -3,7 +3,7 @@ import { Command } from "commander";
 import * as fs from "fs";
 import * as path from "path";
 import { performance } from "node:perf_hooks";
-import { DEFAULT_CONFIG, SkillMetadata } from "./types.js";
+import { DEFAULT_CONFIG, type BenchSandboxMode, SkillMetadata } from "./types.js";
 import { benchmark } from "./runner.js";
 import { printReport, writeJsonReport, printComparison } from "./reporter.js";
 import { pushToLeaderboard } from "./leaderboard.js";
@@ -76,17 +76,28 @@ program
   .option("--runs <n>", "Number of consistency runs (default 5)", parseInt)
   .option("--latency-threshold <ms>", "Latency p95 threshold in ms (default 5000)", parseInt)
   .option("--embed-model <model>", "Ollama embedding model (default nomic-embed-text)")
+  .option(
+    "--sandbox <mode>",
+    "Where skill entrypoint runs: none (default) | subprocess | docker (see CLAW_BENCH_SANDBOX_* env)"
+  )
   .option("--semantic-check", "Run experimental LLM semantic check (requires ANTHROPIC_API_KEY)")
   .option("--skill-version <v>", "Tag this run with a version string for drift tracking")
   .option("--no-store", "Skip recording this run to the local database")
   .option("--output-dir <dir>", "Directory to write benchmark-report.json", "./bench-reports")
   .action(async (skill: string, opts) => {
     console.log(`\nRunning benchmark for: ${skill}`);
+    const sandbox =
+      opts.sandbox === "none" ||
+      opts.sandbox === "subprocess" ||
+      opts.sandbox === "docker"
+        ? (opts.sandbox as BenchSandboxMode)
+        : undefined;
     const config = {
       embedModel: opts.embedModel ?? DEFAULT_CONFIG.embedModel,
       consistencyRuns: opts.runs ?? DEFAULT_CONFIG.consistencyRuns,
       consistencyThreshold: opts.threshold ?? DEFAULT_CONFIG.consistencyThreshold,
       latencyThresholdMs: opts.latencyThreshold ?? DEFAULT_CONFIG.latencyThresholdMs,
+      ...(sandbox !== undefined ? { sandbox } : {}),
     };
     try {
       const report = await benchmark(skill, {
@@ -117,14 +128,25 @@ program
   .option("--runs <n>", "Number of consistency runs (default 5)", parseInt)
   .option("--latency-threshold <ms>", "Latency p95 threshold in ms (default 5000)", parseInt)
   .option("--embed-model <model>", "Ollama embedding model (default nomic-embed-text)")
+  .option(
+    "--sandbox <mode>",
+    "Where skill entrypoint runs: none | subprocess | docker"
+  )
   .option("--output-dir <dir>", "Directory to write reports", "./bench-reports")
   .action(async (skillA: string, skillB: string, opts) => {
     console.log(`\nComparing: ${skillA} vs ${skillB}`);
+    const sandbox =
+      opts.sandbox === "none" ||
+      opts.sandbox === "subprocess" ||
+      opts.sandbox === "docker"
+        ? (opts.sandbox as BenchSandboxMode)
+        : undefined;
     const config = {
       embedModel: opts.embedModel ?? DEFAULT_CONFIG.embedModel,
       consistencyRuns: opts.runs ?? DEFAULT_CONFIG.consistencyRuns,
       consistencyThreshold: opts.threshold ?? DEFAULT_CONFIG.consistencyThreshold,
       latencyThresholdMs: opts.latencyThreshold ?? DEFAULT_CONFIG.latencyThresholdMs,
+      ...(sandbox !== undefined ? { sandbox } : {}),
     };
     try {
       const [reportA, reportB] = await Promise.all([

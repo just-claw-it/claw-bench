@@ -2,6 +2,7 @@ import * as path from "path";
 import * as fs from "fs";
 import {
   BenchConfig,
+  BenchSandboxMode,
   BenchmarkReport,
   DEFAULT_CONFIG,
   SemanticCheckResult,
@@ -149,7 +150,7 @@ export async function benchmark(
   const hasAuthored = benchJson !== null && benchJson.pairs.length > 0;
 
   const [correctness, consistency, robustness, latency] = await Promise.all([
-    scoreCorrectness(skillPath, manifest, benchJson),
+    scoreCorrectness(skillPath, manifest, benchJson, config),
     scoreConsistency(skillPath, manifest, benchJson, config),
     scoreRobustness(skillPath, manifest, config),
     scoreLatency(skillPath, manifest, benchJson, config),
@@ -162,7 +163,12 @@ export async function benchmark(
 
   let semanticCheck: SemanticCheckResult | undefined;
   if (opts.semanticCheck && benchJson?.pairs[0]) {
-    const probeResult = await runSkill(skillPath, manifest, benchJson.pairs[0].input);
+    const probeResult = await runSkill(
+      skillPath,
+      manifest,
+      benchJson.pairs[0].input,
+      config.sandbox
+    );
     const actualOutput = probeResult.output
       ? JSON.stringify(probeResult.output)
       : (probeResult.error ?? "crash");

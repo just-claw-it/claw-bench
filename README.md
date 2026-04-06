@@ -287,6 +287,8 @@ Override the Convex deployment URL if ClawHub moves (rare):
 npx claw-bench run ./examples/echo-skill
 # or: claw-bench run ./my-skill   if linked / global
 
+# Untrusted skills: see "Security and isolation" — e.g. --sandbox subprocess | docker
+
 # Benchmark by name (searches ./skills, ~/.clawhub/skills, etc.)
 npx claw-bench run my-skill
 
@@ -311,6 +313,41 @@ npx claw-bench push --api-key <key>
 
 If a skill ships with `bench.json`, it receives an **authored** score (all four dimensions). Otherwise, it gets an **automated** score (consistency + robustness + latency).
 
+## Security and isolation
+
+Benchmarking a skill means **executing its code** on your machine (`claw-bench run` / `compare` load the skill entrypoint and call it with probe inputs). Treat skills you did not write like **untrusted programs**: they can attempt to read files, use the network, or exhaust resources—subject to your OS user permissions and whatever isolation you configure.
+
+### What “full isolation” means
+
+A **strong** boundary (for actively malicious or compromised skills) is not something a single CLI flag can promise. In practice it means **defense in depth**: isolate execution, restrict network and filesystem access, keep secrets out of the environment, and accept **residual risk** until you use a **separate VM or machine** with a minimal OS and snapshot/reset between runs.
+
+### Layers (weakest → strongest)
+
+| Layer | What it approximates | Typical limits |
+|-------|----------------------|----------------|
+| **`--sandbox none` (default)** | Skill runs **in-process** with `claw-bench` | No isolation: same memory, same user, same network as the CLI. |
+| **`--sandbox subprocess`** | Each skill invocation in a **fresh Node child** | Separates crashes and memory from the parent process; still **same OS user**, same home directory and network exposure as your user. |
+| **`--sandbox docker`** | Each invocation in **`docker run`** with the skill tree mounted read-only under `/skill` | Adds namespace/filesystem separation from the host **but is not a formal security guarantee**: the container shares the host kernel; misconfiguration, privileged containers, or kernel bugs can weaken isolation. |
+| **VM or dedicated machine** | Hypervisor boundary (e.g. QEMU, Hyper‑V, cloud VM) | Skill code never runs on your daily laptop disk or LAN; combine with firewall rules and **no** credentials in the guest. |
+| **Separate physical / air‑gapped host** | Strongest operational separation | Highest cost; still patch the guest and define policy. |
+
+`clawhub analyze` (catalog scoring) **reads** the skill tree and optionally calls an LLM on `SKILL.md`; it does **not** execute the skill entrypoint the way `run` does—risk profiles differ.
+
+### Checklist for running untrusted skills
+
+1. **Prefer a disposable environment** — Run `claw-bench` inside a **VM or CI worker** with no SSH keys, cloud tokens, or corporate filesystem mounts.
+2. **Network** — Default allow **no** egress except what you need (e.g. Ollama on localhost for embeddings). With Docker, consider `--network none` or custom rules via **`CLAW_BENCH_SANDBOX_DOCKER_ARGS`** when the skill does not need the internet.
+3. **Filesystem** — Keep the skill directory **minimal**; use read-only mounts where possible (`docker` mode mounts the skill at `/skill` read-only).
+4. **Secrets** — Do not pass API keys via env unless required; use **`credentialVars`** / skip logic where applicable.
+5. **Resources** — Rely on OS/scheduler limits outside this tool; avoid running benchmarks as root.
+
+### Built-in options (see also `claw-bench run`)
+
+- **`--sandbox subprocess`** — Reduces blast radius vs in-process (child can exit without tearing down the parent); **not** a security boundary by itself.
+- **`--sandbox docker`** — Stronger separation for many threat models; configure image and extra Docker flags via **`CLAW_BENCH_SANDBOX_IMAGE`**, **`CLAW_BENCH_SANDBOX_DOCKER_ARGS`**, and **`CLAW_BENCH_SANDBOX_RUNNER`** if needed ([Environment variables](#environment-variables)).
+
+**Summary:** use **`none`** for trusted local skills; use **`subprocess`** or **`docker`** when you want extra separation; treat **VM + policy** as the baseline for **untrusted** code you would not run as your normal user on your main machine.
+
 ## CLI commands
 
 The first word is always **`claw-bench`** (or **`npx claw-bench`** from a clone — see [Run the CLI from a clone](#run-the-cli-from-a-clone)). Subcommands split into **`clawhub …`** (catalog), **`data …`** (local DB analytics), and top-level commands (**`run`**, **`compare`**, **`report`**, **`dashboard`**, **`push`**).
@@ -329,10 +366,13 @@ Run a full benchmark on a skill.
 | `--skill-version <v>` | Tag run with a version for drift tracking | — |
 | `--no-store` | Skip writing to local DB | — |
 | `--output-dir <dir>` | Report output directory | `./bench-reports` |
+| `--sandbox <mode>` | Where skill code runs: `none` (default, in-process), `subprocess`, or `docker` | `none` |
+
+**Per-run sandboxing** — See **[Security and isolation](#security-and-isolation)** for the threat model and what each mode does *not* guarantee. Short version: default **`none`** runs the skill **in-process**; **`subprocess`** uses a child Node per invocation; **`docker`** uses **`docker run`** with the skill mounted read-only at `/skill` (image **`CLAW_BENCH_SANDBOX_IMAGE`**, extra args **`CLAW_BENCH_SANDBOX_DOCKER_ARGS`**, runner override **`CLAW_BENCH_SANDBOX_RUNNER`**). Set default mode with **`CLAW_BENCH_SANDBOX`**; CLI overrides env.
 
 ### `claw-bench compare <skillA> <skillB>`
 
-Side-by-side benchmark comparison. Accepts the same `--threshold`, `--runs`, `--latency-threshold`, and `--embed-model` flags as `run`.
+Side-by-side benchmark comparison. Accepts the same `--threshold`, `--runs`, `--latency-threshold`, `--embed-model`, and `--sandbox` flags as `run`.
 
 ### `claw-bench report`
 
@@ -398,6 +438,10 @@ See **Skill metadata** under [ClawHub: crawl, download, analyze](#clawhub-crawl-
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `BENCH_EMBED_MODEL` | Default embedding model | `nomic-embed-text` |
+| `CLAW_BENCH_SANDBOX` | Default `run` / `compare` sandbox: `none` \| `subprocess` \| `docker` | `none` |
+| `CLAW_BENCH_SANDBOX_RUNNER` | Absolute path to `sandbox-runner.js` if auto-detection fails | — |
+| `CLAW_BENCH_SANDBOX_IMAGE` | Docker image for `--sandbox docker` | `node:20-bookworm-slim` |
+| `CLAW_BENCH_SANDBOX_DOCKER_ARGS` | Extra `docker run` args (space-separated) | — |
 | `OLLAMA_HOST` | Ollama server URL | `http://localhost:11434` |
 | `CLAW_BENCH_DB` | SQLite database path | `./clawhub/bench.db` (resolved from cwd) |
 | `CLAWHUB_DIR` | Absolute path to the `clawhub` folder (`zip/`, seed sibling layout); overrides DB-relative / cwd `./clawhub` | — |

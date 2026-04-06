@@ -21,7 +21,8 @@ import { consistencyStats } from "./embeddings.js";
 export async function scoreCorrectness(
   skillDir: string,
   manifest: SkillManifest,
-  benchJson: BenchJson | null
+  benchJson: BenchJson | null,
+  config: BenchConfig
 ): Promise<CorrectnessResult> {
   if (!benchJson || benchJson.pairs.length === 0) {
     return { tested: false, passedPairs: 0, totalPairs: 0, misses: [], score: 0 };
@@ -32,7 +33,7 @@ export async function scoreCorrectness(
 
   for (let i = 0; i < benchJson.pairs.length; i++) {
     const pair = benchJson.pairs[i];
-    const result = await runSkill(skillDir, manifest, pair.input);
+    const result = await runSkill(skillDir, manifest, pair.input, config.sandbox);
     if (result.crashed || result.output === null) {
       misses.push({
         pairIndex: i,
@@ -75,12 +76,7 @@ export async function scoreConsistency(
   benchJson: BenchJson | null,
   config: BenchConfig
 ): Promise<ConsistencyResult> {
-  const outputs = await collectConsistencyOutputs(
-    skillDir,
-    manifest,
-    benchJson,
-    config.consistencyRuns
-  );
+  const outputs = await collectConsistencyOutputs(skillDir, manifest, benchJson, config);
 
   let minSimilarity: number;
   let avgSimilarity: number;
@@ -161,7 +157,7 @@ export async function scoreLatency(
   const runs = config.consistencyRuns;
 
   for (let i = 0; i < runs; i++) {
-    const result = await runSkill(skillDir, manifest, input);
+    const result = await runSkill(skillDir, manifest, input, config.sandbox);
     samples.push(result.durationMs);
   }
 
