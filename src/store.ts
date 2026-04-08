@@ -20,7 +20,13 @@ import * as path from "path";
 import { spawnSync } from "node:child_process";
 import initSqlJs, { type Database, type SqlJsStatic } from "sql.js";
 import BetterSqlite from "better-sqlite3";
-import { BenchmarkReport, SkillMetadata, ClawHubSkillEntry, ClawHubAnalysis } from "./types.js";
+import {
+  BenchmarkReport,
+  SkillMetadata,
+  ClawHubSkillEntry,
+  ClawHubAnalysis,
+  ClawHubRuntimeRequirements,
+} from "./types.js";
 import {
   CLAWHUB_LLM_LATEST_PER_MODEL_SUB,
   buildClawhubLlmAggregateSubquery,
@@ -172,6 +178,14 @@ CREATE TABLE IF NOT EXISTS clawhub_analysis (
   pipeline_ms          INTEGER,
   analysis_insights    TEXT,
   llm_outcome          TEXT,
+  req_internet         INTEGER,
+  req_disk_read        INTEGER,
+  req_disk_write       INTEGER,
+  req_secrets          INTEGER,
+  req_subprocess       INTEGER,
+  req_system_tools     INTEGER,
+  req_confidence       TEXT,
+  req_evidence_json    TEXT,
   FOREIGN KEY (slug) REFERENCES clawhub_skills(slug)
 );
 
@@ -226,6 +240,31 @@ function ensureClawhubAnalysisLlmOutcomeColumn(db: Database): void {
   }
 }
 
+function ensureClawhubAnalysisRequirementColumns(db: Database): void {
+  if (!clawhubAnalysisColumnNames(db).has("slug")) return;
+  const cols = clawhubAnalysisColumnNames(db);
+  const addInt = (name: string) => {
+    if (!cols.has(name)) {
+      db.run(`ALTER TABLE clawhub_analysis ADD COLUMN ${name} INTEGER`);
+      cols.add(name);
+    }
+  };
+  const addText = (name: string) => {
+    if (!cols.has(name)) {
+      db.run(`ALTER TABLE clawhub_analysis ADD COLUMN ${name} TEXT`);
+      cols.add(name);
+    }
+  };
+  addInt("req_internet");
+  addInt("req_disk_read");
+  addInt("req_disk_write");
+  addInt("req_secrets");
+  addInt("req_subprocess");
+  addInt("req_system_tools");
+  addText("req_confidence");
+  addText("req_evidence_json");
+}
+
 /** Sets `llm_outcome = 'ok'` for legacy rows that already had model + composite. */
 function backfillClawhubAnalysisLlmOutcomeOk(db: Database): void {
   if (!clawhubAnalysisColumnNames(db).has("llm_outcome")) return;
@@ -258,6 +297,7 @@ function migrate(db: Database): void {
   db.exec(SCHEMA);
   ensureClawhubAnalysisTimingColumns(db);
   ensureClawhubAnalysisLlmOutcomeColumn(db);
+  ensureClawhubAnalysisRequirementColumns(db);
   backfillClawhubAnalysisLlmOutcomeOk(db);
   ensureRunsDashboardIndexes(db);
   ensureClawHubQueryIndexes(db);
@@ -1288,6 +1328,61 @@ export function storeClawHubAnalysis(analysis: ClawHubAnalysis): Promise<number>
     saveDb(db, fp);
     db.close();
     return rowid;
+  });
+}
+
+/**
+ * Update inferred runtime requirements on the latest analysis row for a slug.
+ * Safe additive enrichment: does not modify existing score/timing fields.
+ */
+export function updateLatestClawHubAnalysisRequirements(
+  slug: string,
+  req: ClawHubRuntimeRequirements
+): Promise<boolean> {
+  return serialize(async () => {
+    invalidateReadDbCache();
+    const SQL = await getSql();
+    const fp = dbPath();
+    if (!fs.existsSync(fp)) return false;
+    const db = loadDb(SQL, fp);
+    const idRows = db.exec(
+      `SELECT id FROM clawhub_analysis
+       WHERE slug = ?
+       ORDER BY analyzed_at DESC, id DESC
+       LIMIT 1`,
+      [slug]
+    );
+    const id = idRows[0]?.values[0]?.[0] as number | undefined;
+    if (id === undefined) {
+      db.close();
+      return false;
+    }
+    db.run(
+      `UPDATE clawhub_analysis SET
+        req_internet = ?,
+        req_disk_read = ?,
+        req_disk_write = ?,
+        req_secrets = ?,
+        req_subprocess = ?,
+        req_system_tools = ?,
+        req_confidence = ?,
+        req_evidence_json = ?
+       WHERE id = ?`,
+      [
+        req.needsInternet ? 1 : 0,
+        req.needsDiskRead ? 1 : 0,
+        req.needsDiskWrite ? 1 : 0,
+        req.needsSecrets ? 1 : 0,
+        req.needsSubprocess ? 1 : 0,
+        req.needsSystemTools ? 1 : 0,
+        req.confidence,
+        JSON.stringify(req.evidence),
+        id,
+      ]
+    );
+    saveDb(db, fp);
+    db.close();
+    return true;
   });
 }
 

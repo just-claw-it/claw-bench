@@ -121,7 +121,7 @@ describe("store ClawHub analysis", () => {
     await storeClawHubAnalysis(baseAnalysis());
 
     const rows0 = await query<Record<string, unknown>>(
-      "SELECT extract_ms, static_analysis_ms, llm_ms, file_stats_ms, pipeline_ms, llm_model, llm_outcome, analysis_insights FROM clawhub_analysis WHERE slug = ?",
+      "SELECT extract_ms, static_analysis_ms, llm_ms, file_stats_ms, pipeline_ms, llm_model, llm_outcome, analysis_insights, req_internet, req_disk_read, req_disk_write, req_secrets, req_subprocess, req_system_tools, req_confidence, req_evidence_json FROM clawhub_analysis WHERE slug = ?",
       [entry.slug]
     );
     assert.equal(rows0.length, 1);
@@ -131,6 +131,8 @@ describe("store ClawHub analysis", () => {
     assert.equal(rows0[0].file_stats_ms, 2);
     assert.equal(rows0[0].pipeline_ms, 20);
     assert.equal(rows0[0].llm_outcome, null);
+    assert.equal(rows0[0].req_internet, null);
+    assert.equal(rows0[0].req_confidence, null);
     assert.equal(typeof rows0[0].analysis_insights, "string");
     const parsed0 = JSON.parse(String(rows0[0].analysis_insights)) as {
       credentialHygiene?: { hygieneLevel?: string };
@@ -271,6 +273,46 @@ describe("store ClawHub analysis", () => {
       if (prevCli === undefined) delete process.env.CLAW_BENCH_USE_SQLITE3_CLI;
       else process.env.CLAW_BENCH_USE_SQLITE3_CLI = prevCli;
     }
+  });
+
+  it("updateLatestClawHubAnalysisRequirements writes requirement columns only", async () => {
+    const { upsertClawHubSkill, storeClawHubAnalysis, updateLatestClawHubAnalysisRequirements, query } =
+      await import("../store.js");
+    const slug = "requirements-backfill-slug";
+    await upsertClawHubSkill({ ...entry, slug }, {});
+    await storeClawHubAnalysis(baseAnalysis({ slug }));
+    const updated = await updateLatestClawHubAnalysisRequirements(slug, {
+      needsInternet: true,
+      needsDiskRead: true,
+      needsDiskWrite: false,
+      needsSecrets: true,
+      needsSubprocess: false,
+      needsSystemTools: true,
+      confidence: "high",
+      evidence: ["internet:index.js", "secrets:skill.json"],
+    });
+    assert.equal(updated, true);
+    const rows = await query<{
+      req_internet: number | null;
+      req_disk_read: number | null;
+      req_disk_write: number | null;
+      req_secrets: number | null;
+      req_subprocess: number | null;
+      req_system_tools: number | null;
+      req_confidence: string | null;
+      req_evidence_json: string | null;
+    }>(
+      "SELECT req_internet, req_disk_read, req_disk_write, req_secrets, req_subprocess, req_system_tools, req_confidence, req_evidence_json FROM clawhub_analysis WHERE slug = ? ORDER BY id DESC LIMIT 1",
+      [slug]
+    );
+    assert.equal(rows[0]?.req_internet, 1);
+    assert.equal(rows[0]?.req_disk_read, 1);
+    assert.equal(rows[0]?.req_disk_write, 0);
+    assert.equal(rows[0]?.req_secrets, 1);
+    assert.equal(rows[0]?.req_subprocess, 0);
+    assert.equal(rows[0]?.req_system_tools, 1);
+    assert.equal(rows[0]?.req_confidence, "high");
+    assert.equal(typeof rows[0]?.req_evidence_json, "string");
   });
 });
 

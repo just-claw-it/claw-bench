@@ -6,6 +6,7 @@ dashboard/node_modules/
 bench-reports/
 # Local research drafts, Parquet exports, Claude drafting packs (not tracked)
 paper/
+research-local/
 .DS_Store
 Thumbs.db
 *.tmp

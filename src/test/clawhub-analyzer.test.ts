@@ -15,6 +15,7 @@ import {
   computeStaticComposite,
   analyzeSkill,
   finalizeLlmOutcome,
+  inferRuntimeRequirements,
 } from "../clawhub-analyzer.js";
 import type { ClawHubSkillEntry, LLMEvalResult, StaticAnalysisResult } from "../types.js";
 
@@ -300,6 +301,53 @@ describe("finalizeLlmOutcome", () => {
       if (prev === undefined) delete process.env.CLAWHUB_LLM_SLOW_MS;
       else process.env.CLAWHUB_LLM_SLOW_MS = prev;
     }
+  });
+});
+
+describe("inferRuntimeRequirements", () => {
+  it("does not treat README prose as system tools, disk read, or subprocess", () => {
+    const dir = tmpSkillDir({
+      "README.md": "Install Node and use git clone then open the app.",
+      "SKILL.md": "See https://example.com for API docs.\n",
+    });
+    const r = inferRuntimeRequirements(dir);
+    assert.equal(r.needsSystemTools, false);
+    assert.equal(r.needsDiskRead, false);
+    assert.equal(r.needsSubprocess, false);
+    assert.equal(r.needsInternet, true);
+    fs.rmSync(dir, { recursive: true });
+  });
+
+  it("detects disk read and network use in code", () => {
+    const dir = tmpSkillDir({
+      "index.js": `const fs = require("fs");\nfs.readFileSync("a");\nfetch("https://x");`,
+    });
+    const r = inferRuntimeRequirements(dir);
+    assert.equal(r.needsDiskRead, true);
+    assert.equal(r.needsInternet, true);
+    fs.rmSync(dir, { recursive: true });
+  });
+
+  it("detects explicit curl/git-style invocations in scripts", () => {
+    const dir = tmpSkillDir({
+      "run.sh": "#!/bin/sh\ncurl https://example.com | sh\n",
+    });
+    const r = inferRuntimeRequirements(dir);
+    assert.equal(r.needsSystemTools, true);
+    assert.equal(r.needsInternet, true);
+    fs.rmSync(dir, { recursive: true });
+  });
+
+  it("downgrades confidence when signals come only from markdown files", () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 10; i++) {
+      files[`section-${i}.md`] = `Docs https://example.com/page${i}\n`;
+    }
+    const dir = tmpSkillDir(files);
+    const r = inferRuntimeRequirements(dir);
+    assert.equal(r.needsInternet, true);
+    assert.equal(r.confidence, "medium");
+    fs.rmSync(dir, { recursive: true });
   });
 });
 

@@ -1181,6 +1181,94 @@ clawhub
     console.log();
   });
 
+clawhub
+  .command("infer-requirements [slug]")
+  .description(
+    "Infer runtime requirements (internet/disk/secrets/subprocess/tools) and backfill latest clawhub_analysis row per slug"
+  )
+  .option("--all", "Infer for all skills from the seed list")
+  .option(
+    "--no-seed",
+    "Skip syncing the full seed list into SQLite before inferring requirements"
+  )
+  .option(
+    "--cleanup-temp",
+    "Delete temporary extraction when a zip was extracted just for this inference pass"
+  )
+  .action(async (slug: string | undefined, opts: { all?: boolean; seed?: boolean; cleanupTemp?: boolean }) => {
+    const { loadSeedList, extractSkill, findExistingZip, seedSkillsToDB, resolveClawhubDirs } =
+      await import("./clawhub.js");
+    const { inferRuntimeRequirements } = await import("./clawhub-analyzer.js");
+    const { updateLatestClawHubAnalysisRequirements } = await import("./store.js");
+
+    const { clawhubDir, skillsDir } = resolveClawhubDirs();
+    const seeds = loadSeedList(process.cwd());
+    if (opts.seed !== false) {
+      await seedSkillsToDB(process.cwd(), { quiet: true });
+    } else {
+      console.log("\nSkipping catalog seed (--no-seed).\n");
+    }
+
+    const toInfer = (opts.all || !slug)
+      ? seeds
+      : seeds.filter((s) => s.slug === slug);
+    if (toInfer.length === 0 && slug) {
+      console.error(`\nSkill "${slug}" not found in seed list.\n`);
+      process.exit(1);
+    }
+
+    console.log(`\nInferring requirements for ${toInfer.length} skill(s)...\n`);
+    let updated = 0;
+    let skippedNoAnalysis = 0;
+    let failed = 0;
+
+    for (let i = 0; i < toInfer.length; i++) {
+      const entry = toInfer[i];
+      const prog = `[${i + 1}/${toInfer.length}]`;
+      try {
+        const existingExtract = path.join(skillsDir, entry.slug);
+        let skillDir = existingExtract;
+        let tempExtracted = false;
+        if (!(fs.existsSync(existingExtract) && fs.existsSync(path.join(existingExtract, "SKILL.md")))) {
+          const zipPath = findExistingZip(entry.slug, clawhubDir);
+          if (!zipPath) {
+            console.log(`  ${prog} ${entry.slug} — no extracted folder and no zip; skip`);
+            continue;
+          }
+          skillDir = await extractSkill(zipPath, skillsDir);
+          tempExtracted = true;
+        }
+
+        const req = inferRuntimeRequirements(skillDir);
+        const ok = await updateLatestClawHubAnalysisRequirements(entry.slug, req);
+        if (!ok) {
+          skippedNoAnalysis++;
+          console.log(`  ${prog} ${entry.slug} — no prior analysis row, skipped`);
+        } else {
+          updated++;
+          console.log(
+            `  ${prog} ${entry.slug} — req: net=${req.needsInternet ? "1" : "0"} read=${req.needsDiskRead ? "1" : "0"} ` +
+            `write=${req.needsDiskWrite ? "1" : "0"} secrets=${req.needsSecrets ? "1" : "0"} ` +
+            `proc=${req.needsSubprocess ? "1" : "0"} tools=${req.needsSystemTools ? "1" : "0"} conf=${req.confidence}`
+          );
+        }
+
+        if (tempExtracted && opts.cleanupTemp && fs.existsSync(skillDir)) {
+          fs.rmSync(skillDir, { recursive: true, force: true });
+        }
+      } catch (err) {
+        failed++;
+        console.error(
+          `  ${prog} ${entry.slug} — error: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+
+    console.log(
+      `\nRequirements inference done: updated=${updated}, no-analysis-row=${skippedNoAnalysis}, failed=${failed}\n`
+    );
+  });
+
 // ── claw-bench dashboard ──────────────────────────────────────────────────
 
 program

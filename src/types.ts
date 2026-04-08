@@ -291,6 +291,21 @@ export interface ClawHubSourceInsights {
   };
 }
 
+/**
+ * Heuristic runtime requirements inferred from source/docs (not dynamic tracing).
+ * Stricter matching applies to code/config; .md/.txt only contribute network + secret-like signals.
+ */
+export interface ClawHubRuntimeRequirements {
+  needsInternet: boolean;
+  needsDiskRead: boolean;
+  needsDiskWrite: boolean;
+  needsSecrets: boolean;
+  needsSubprocess: boolean;
+  needsSystemTools: boolean;
+  confidence: "low" | "medium" | "high";
+  evidence: string[];
+}
+
 /** Combined analysis result for a ClawHub skill. */
 export interface ClawHubAnalysis {
   slug: string;

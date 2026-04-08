@@ -15,6 +15,7 @@ import {
   ClawHubAnalysis,
   ClawHubSkillEntry,
   ClawHubSourceInsights,
+  ClawHubRuntimeRequirements,
 } from "./types.js";
 import { collectFileStats, readdirSafeDirents, readdirSafeNames } from "./clawhub.js";
 import { computeOverallComposite } from "./clawhub-scoring.js";
@@ -318,6 +319,244 @@ function scanSecurity(skillDir: string): SecurityScanResult {
 
 export function analyzeSecurity(skillDir: string): number {
   return scanSecurity(skillDir).score;
+}
+
+// ── Runtime requirements inference (heuristic) ─────────────────────────────
+// Code/config use full pattern sets; .md/.txt only get network + secret signals (README prose
+// should not flip disk/subprocess/system-tools). Dropped generic `open(` and bare `node`/`git` in docs.
+
+const INTERNET_PATTERNS = [
+  /\bfetch\s*\(/,
+  /\baxios\b/,
+  /\bhttps?:\/\//i,
+  /\bXMLHttpRequest\b/,
+  /\bWebSocket\b/,
+  /\bhttp\.request\s*\(/,
+  /\bhttps\.request\s*\(/,
+  /\bopenai\b/i,
+  /\banthropic\b/i,
+  /\bimport\s+requests\b/,
+  /\bfrom\s+requests\b/,
+  /\burllib\.(request|error)\b/,
+  /\bhttpx\./,
+  /\baiohttp\./,
+];
+
+const DISK_READ_PATTERNS = [
+  /\bfs\.readFileSync\b/,
+  /\bfs\.readFile\b/,
+  /\bfs\.createReadStream\b/,
+  /\bfs\.promises\.readFile\b/,
+  /\breadFileSync\b/,
+  /\bfs\.readdir(?:Sync)?\b/,
+  /\bwith\s+open\s*\(/,
+  /\bpathlib\.Path\s*\(/,
+  /\.read_text\s*\(/,
+  /\.read_bytes\s*\(/,
+  /\bos\.path\.(?:exists|isfile|isdir|getsize)\b/,
+  /\bioutil\.ReadFile\b/,
+  /\bos\.ReadFile\b/,
+];
+
+const DISK_WRITE_PATTERNS = [
+  /\bfs\.writeFileSync\b/,
+  /\bfs\.writeFile\b/,
+  /\bfs\.appendFile(?:Sync)?\b/,
+  /\bappendFile\b/,
+  /\bcreateWriteStream\b/,
+  /\bmkdtemp(?:Sync)?\b/,
+  /\bmkdirSync\b/,
+  /\brmSync\b/,
+  /\bunlinkSync\b/,
+  /\bopen\s*\([^)]*,\s*["']w/,
+  /\.write_text\s*\(/,
+  /\.write_bytes\s*\(/,
+  /\bjson\.dump\s*\(/,
+  /\byaml\.(?:dump|safe_dump)\s*\(/,
+];
+
+const SECRET_USAGE_PATTERNS = [
+  /process\.env\.[A-Z_][A-Z0-9_]*/,
+  /\bgetenv\s*\(\s*["'][A-Z_][A-Z0-9_]*["']/,
+  /\bAPI_KEY\b/i,
+  /\bSECRET\b/i,
+  /\bTOKEN\b/i,
+  /\bPASSWORD\b/i,
+  /Authorization:\s*Bearer/i,
+];
+
+const SUBPROCESS_PATTERNS = [
+  /\bchild_process\b/,
+  /\bspawn(?:Sync)?\s*\(/,
+  /\bexec(?:Sync)?\s*\(/,
+  /\bexecFile(?:Sync)?\s*\(/,
+  /\bsubprocess\./,
+  /\bimport\s+subprocess\b/,
+  /\bfrom\s+subprocess\s+import/,
+  /\bPopen\s*\(/,
+  /\bos\.system\s*\(/,
+  /\bexec\.Command\s*\(/,
+];
+
+/** External CLIs — not applied to .md/.txt. Avoids matching "install Node" / `git clone` prose without code. */
+const SYSTEM_TOOL_PATTERNS = [
+  /\b(?:curl|wget)\s+(?:-[a-zA-Z0-9]\s*)*["']?https?:\/\//,
+  /\bgit\s+(?:clone|pull|push|fetch|checkout|merge|rebase)\b/,
+  /\bdocker(?:\s+run|\s+build|\s+exec|\s+compose|\s*file)\b/i,
+  /\bffmpeg\b/,
+  /(?:exec|spawn|execFile)(?:Sync)?\s*\([^)]*["'](?:curl|wget|git|docker|ffmpeg)/,
+];
+
+const DOC_LIKE_EXT = new Set([".md", ".txt"]);
+
+const SCANNABLE_TEXT_EXT = new Set([
+  ...DOC_LIKE_EXT,
+  ".js",
+  ".ts",
+  ".jsx",
+  ".tsx",
+  ".mjs",
+  ".cjs",
+  ".py",
+  ".sh",
+  ".rb",
+  ".go",
+  ".java",
+  ".rs",
+  ".php",
+  ".json",
+  ".yml",
+  ".yaml",
+  ".toml",
+  ".ini",
+]);
+
+function looksLikeNamedTextFile(fileName: string): boolean {
+  const b = fileName.toLowerCase();
+  return b === "dockerfile" || b.endsWith(".dockerfile") || b === "makefile";
+}
+
+export function inferRuntimeRequirements(skillDir: string): ClawHubRuntimeRequirements {
+  let needsInternet = false;
+  let needsDiskRead = false;
+  let needsDiskWrite = false;
+  let needsSecrets = false;
+  let needsSubprocess = false;
+  let needsSystemTools = false;
+  const evidence = new Set<string>();
+  let filesScanned = 0;
+  /** Any signal from code or config (not from .md/.txt only). */
+  let signalFromCodeOrConfig = false;
+
+  const markCodeOrConfig = (docOnly: boolean): void => {
+    if (!docOnly) signalFromCodeOrConfig = true;
+  };
+
+  const detect = (content: string, rel: string, docOnly: boolean): void => {
+    for (const p of INTERNET_PATTERNS) {
+      if (p.test(content)) {
+        needsInternet = true;
+        evidence.add(`internet:${rel}`);
+        markCodeOrConfig(docOnly);
+        break;
+      }
+    }
+    for (const p of SECRET_USAGE_PATTERNS) {
+      if (p.test(content)) {
+        needsSecrets = true;
+        evidence.add(`secrets:${rel}`);
+        markCodeOrConfig(docOnly);
+        break;
+      }
+    }
+    if (docOnly) return;
+
+    for (const p of DISK_READ_PATTERNS) {
+      if (p.test(content)) {
+        needsDiskRead = true;
+        evidence.add(`disk_read:${rel}`);
+        markCodeOrConfig(docOnly);
+        break;
+      }
+    }
+    for (const p of DISK_WRITE_PATTERNS) {
+      if (p.test(content)) {
+        needsDiskWrite = true;
+        evidence.add(`disk_write:${rel}`);
+        markCodeOrConfig(docOnly);
+        break;
+      }
+    }
+    for (const p of SUBPROCESS_PATTERNS) {
+      if (p.test(content)) {
+        needsSubprocess = true;
+        evidence.add(`subprocess:${rel}`);
+        markCodeOrConfig(docOnly);
+        break;
+      }
+    }
+    for (const p of SYSTEM_TOOL_PATTERNS) {
+      if (p.test(content)) {
+        needsSystemTools = true;
+        evidence.add(`sys_tools:${rel}`);
+        markCodeOrConfig(docOnly);
+        break;
+      }
+    }
+  };
+
+  const walk = (dir: string, depth = 0) => {
+    if (depth > 10) return;
+    for (const entry of readdirSafeDirents(dir)) {
+      if (entry.name === "node_modules" || entry.name === ".git") continue;
+      if (entry.isSymbolicLink()) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full, depth + 1);
+        continue;
+      }
+      const ext = path.extname(entry.name).toLowerCase();
+      const named = looksLikeNamedTextFile(entry.name);
+      if (!named && !SCANNABLE_TEXT_EXT.has(ext)) continue;
+      const docOnly = !named && DOC_LIKE_EXT.has(ext);
+      try {
+        const content = fs.readFileSync(full, "utf-8");
+        filesScanned++;
+        detect(content, path.relative(skillDir, full), docOnly);
+      } catch {
+        // ignore unreadable files
+      }
+    }
+  };
+  walk(skillDir);
+
+  const signalCount = [
+    needsInternet,
+    needsDiskRead,
+    needsDiskWrite,
+    needsSecrets,
+    needsSubprocess,
+    needsSystemTools,
+  ].filter(Boolean).length;
+
+  let confidence: "low" | "medium" | "high" =
+    filesScanned >= 10 || signalCount >= 3 ? "high" : filesScanned >= 3 ? "medium" : "low";
+
+  if (signalCount > 0 && !signalFromCodeOrConfig) {
+    confidence = confidence === "high" ? "medium" : confidence;
+    if (filesScanned < 4) confidence = "low";
+  }
+
+  return {
+    needsInternet,
+    needsDiskRead,
+    needsDiskWrite,
+    needsSecrets,
+    needsSubprocess,
+    needsSystemTools,
+    confidence,
+    evidence: [...evidence].sort().slice(0, 30),
+  };
 }
 
 // ── Code Quality (0–1 or null) ─────────────────────────────────────────────
